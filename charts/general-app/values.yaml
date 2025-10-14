@@ -197,3 +197,57 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Init containers configuration
+# Init containers run before the main application containers start
+# They are useful for setup tasks like database migrations, file downloads, etc.
+initContainers: []
+# Example:
+# initContainers:
+#   - name: wait-for-db
+#     image: busybox:1.35
+#     command: ['sh', '-c']
+#     args:
+#       - |
+#         until nc -z postgres-service 5432; do
+#           echo "Waiting for database..."
+#           sleep 2
+#         done
+#         echo "Database is ready!"
+#     env:
+#       - name: DB_HOST
+#         value: "postgres-service"
+#       - name: DB_PORT
+#         value: "5432"
+#   - name: download-config
+#     image: alpine:3.18
+#     command: ['sh', '-c']
+#     args:
+#       - |
+#         apk add --no-cache curl
+#         curl -o /shared/config.json https://api.example.com/config
+#         echo "Config downloaded successfully"
+#     volumeMounts:
+#       - name: shared-data
+#         mountPath: /shared
+#     resources:
+#       requests:
+#         memory: "64Mi"
+#         cpu: "100m"
+#       limits:
+#         memory: "128Mi"
+#         cpu: "200m"
+#   - name: setup-permissions
+#     image: alpine:3.18
+#     command: ['sh', '-c']
+#     args:
+#       - |
+#         chown -R 1000:1000 /app/data
+#         chmod -R 755 /app/data
+#         echo "Permissions set successfully"
+#     volumeMounts:
+#       - name: app-data
+#         mountPath: /app/data
+#     securityContext:
+#       runAsUser: 0
+#       runAsGroup: 0
