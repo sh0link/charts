@@ -56,6 +56,44 @@ service:
   # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
   port: 80
 
+# Environment variables for the container
+# You can set environment variables in multiple ways:
+# 1. Direct key-value pairs
+# 2. From ConfigMap
+# 3. From Secret
+# 4. From field references (pod metadata, etc.)
+env: []
+# Example:
+# env:
+#   - name: DATABASE_URL
+#     value: "postgresql://user:pass@localhost/db"
+#   - name: API_KEY
+#     valueFrom:
+#       secretKeyRef:
+#         name: my-secret
+#         key: api-key
+#   - name: NODE_NAME
+#     valueFrom:
+#       fieldRef:
+#         fieldPath: spec.nodeName
+#   - name: POD_IP
+#     valueFrom:
+#       fieldRef:
+#         fieldPath: status.podIP
+
+# Environment variables from ConfigMap or Secret
+# This allows you to load all key-value pairs from a ConfigMap or Secret
+envFrom: []
+# Example:
+# envFrom:
+#   - configMapRef:
+#       name: app-config
+#   - secretRef:
+#       name: app-secrets
+#   - configMapRef:
+#       name: shared-config
+#       optional: true
+
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
   enabled: false
