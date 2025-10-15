@@ -3,6 +3,16 @@ entries:
   general-app:
   - apiVersion: v2
     appVersion: 1.16.0
+    created: "2025-10-15T01:15:36.693394049Z"
+    description: A Helm chart for Kubernetes
+    digest: 0d6c92bc680950283c57f40b190639d13b83fd84b88c512860649b0b4a66db51
+    name: general-app
+    type: application
+    urls:
+    - https://github.com/sh0link/charts/releases/download/general-app-0.3.0/general-app-0.3.0.tgz
+    version: 0.3.0
+  - apiVersion: v2
+    appVersion: 1.16.0
     created: "2025-10-14T23:58:19.817088692Z"
     description: A Helm chart for Kubernetes
     digest: 606f60bddc063a8ecc36bbb541b1c6b2b1e27777cfbf2e205970d10b5b0d8b58
@@ -21,4 +31,4 @@ entries:
     urls:
     - https://github.com/sh0link/charts/releases/download/general-app-0.1.0/general-app-0.1.0.tgz
     version: 0.1.0
-generated: "2025-10-14T23:58:19.81710357Z"
+generated: "2025-10-15T01:15:36.693407233Z"
