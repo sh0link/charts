@@ -251,3 +251,73 @@ initContainers: []
 #     securityContext:
 #       runAsUser: 0
 #       runAsGroup: 0
+
+# ConfigMap volume mounts configuration
+# This allows you to mount ConfigMaps to specific paths in the container
+configMapMounts: []
+# Example:
+# configMapMounts:
+#   - name: app-config
+#     configMapName: my-app-config
+#     mountPath: /etc/app/config
+#     readOnly: true
+#     defaultMode: 0644
+#   - name: nginx-config
+#     configMapName: nginx-configmap
+#     mountPath: /etc/nginx/nginx.conf
+#     subPath: nginx.conf
+#     readOnly: true
+#     defaultMode: 0644
+#   - name: app-secrets
+#     configMapName: app-secrets-configmap
+#     mountPath: /etc/secrets
+#     readOnly: true
+#     defaultMode: 0600
+#     optional: true
+#   - name: multi-file-config
+#     configMapName: multi-file-configmap
+#     mountPath: /etc/config
+#     items:
+#       - key: config.json
+#         path: app/config.json
+#       - key: settings.yaml
+#         path: app/settings.yaml
+#     readOnly: true
+#     defaultMode: 0644
+
+# ConfigMap configuration
+# This allows you to create a new ConfigMap or use an existing one
+configMap:
+  # Whether to create a new ConfigMap
+  create: false
+
+  # Annotations for the ConfigMap
+  annotations: {}
+
+  # Data for the ConfigMap (key-value pairs)
+  data: {}
+  # Example:
+  # data:
+  #   config.json: |
+  #     {
+  #       "database": {
+  #         "host": "localhost",
+  #         "port": 5432
+  #       },
+  #       "redis": {
+  #         "host": "redis-service",
+  #         "port": 6379
+  #       }
+  #     }
+  #   nginx.conf: |
+  #     server {
+  #         listen 80;
+  #         server_name example.com;
+  #         location / {
+  #             proxy_pass http://backend;
+  #         }
+  #     }
+  #   app.properties: |
+  #     app.name=MyApp
+  #     app.version=1.0.0
+  #     debug=true

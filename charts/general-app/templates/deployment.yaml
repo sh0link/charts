@@ -68,13 +68,38 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.volumeMounts }}
           volumeMounts:
+          {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- with .Values.volumes }}
+          {{- range $mount := .Values.configMapMounts }}
+          - name: {{ $mount.name }}
+            mountPath: {{ $mount.mountPath }}
+            {{- if $mount.subPath }}
+            subPath: {{ $mount.subPath }}
+            {{- end }}
+            {{- if $mount.readOnly }}
+            readOnly: {{ $mount.readOnly }}
+            {{- end }}
+          {{- end }}
       volumes:
+      {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- range $mount := .Values.configMapMounts }}
+      - name: {{ $mount.name }}
+        configMap:
+          name: {{ $mount.configMapName }}
+          {{- if $mount.items }}
+          items:
+            {{- toYaml $mount.items | nindent 14 }}
+          {{- end }}
+          {{- if $mount.defaultMode }}
+          defaultMode: {{ $mount.defaultMode }}
+          {{- end }}
+          {{- if $mount.optional }}
+          optional: {{ $mount.optional }}
+          {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
