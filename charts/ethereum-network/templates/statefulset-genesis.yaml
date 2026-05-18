@@ -1,0 +1,282 @@
+{{- if include "ethereum-network.needsGenesis" . -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+{{- $name := printf "%s-genesis" $rel -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        ethereum-network.io/role: genesis
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: {{ $rel }}-genesis-nginx
+        - name: web
+          emptyDir: {}
+      initContainers:
+        # ── 1. Generate genesis artefacts ────────────────────────────
+        - name: generate
+          image: {{ .Values.devnet.genesisGenerator.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CHAIN_ID
+              value: {{ .Values.devnet.chainId | quote }}
+            - name: EL_FORK
+              value: {{ .Values.devnet.genesisGenerator.elFork | quote }}
+            - name: CL_FORK
+              value: {{ .Values.devnet.genesisGenerator.clFork | quote }}
+            - name: PRESET_BASE
+              value: {{ .Values.devnet.preset | quote }}
+            - name: GENESIS_DELAY
+              value: {{ .Values.devnet.genesisGenerator.genesisDelay | quote }}
+            {{- with .Values.devnet.genesisGenerator.genesisTimestamp }}
+            - name: GENESIS_TIMESTAMP
+              value: {{ . | quote }}
+            {{- end }}
+            # NUMBER_OF_VALIDATORS is the var ethpandaops generator 4.x/5.x
+            # actually consumes. Kept aliases for older versions.
+            - name: NUMBER_OF_VALIDATORS
+              value: {{ .Values.devnet.validatorCount | quote }}
+            - name: NUMBER_OF_VALIDATOR_KEYS
+              value: {{ .Values.devnet.validatorCount | quote }}
+            - name: NUMBER_OF_DEPOSITS
+              value: {{ .Values.devnet.validatorCount | quote }}
+            - name: EL_AND_CL_MNEMONIC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rel }}-mnemonic
+                  key: mnemonic
+            # Pass-through env for future forks (Gloas / Heze / BPOs, etc.).
+            # Generator entrypoint reads XXX_FORK_EPOCH=0 to activate at genesis.
+            {{- range $k, $v := .Values.devnet.genesisGenerator.extraEnv }}
+            - { name: {{ $k | quote }}, value: {{ $v | quote }} }
+            {{- end }}
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              if [ -f /data/.generated ]; then
+                echo "Genesis already generated, skipping"
+                exit 0
+              fi
+              # When GENESIS_TIMESTAMP is unset (or zero/empty), pick a
+              # near-future unix timestamp so CL clients align slot 0 with
+              # actual wall-clock. Without this the generator writes a tiny
+              # relative offset (e.g. "30") into config.yaml as MIN_GENESIS_TIME,
+              # which CLs interpret as 1970-01-01+30s and immediately think
+              # the chain is 56 years behind.
+              if [ -z "${GENESIS_TIMESTAMP:-}" ] || [ "${GENESIS_TIMESTAMP:-0}" -lt 1700000000 ] 2>/dev/null; then
+                export GENESIS_TIMESTAMP=$(( $(date +%s) + ${GENESIS_DELAY:-30} ))
+                echo "GENESIS_TIMESTAMP defaulted to $GENESIS_TIMESTAMP (now + ${GENESIS_DELAY:-30}s)"
+              fi
+              mkdir -p /data
+              cd /work 2>/dev/null || cd /
+              # ethereum-genesis-generator runs its bundled entrypoint script
+              # which honours the env vars above and writes to /data.
+              if [ -x /work/entrypoint.sh ]; then
+                /work/entrypoint.sh all
+              elif [ -x /entrypoint.sh ]; then
+                /entrypoint.sh all
+              else
+                # Fallback for image variants without entrypoint.sh in PATH
+                /usr/local/bin/genesis all
+              fi
+              touch /data/.generated
+              echo "Genesis generated"
+              ls -la /data
+          volumeMounts:
+            - { name: data, mountPath: /data }
+
+        # ── 2. Generate validator client keystores (one tree per role=validator node) ──
+        # eth2-val-tools is shipped inside the genesis-generator image. It
+        # produces /data/vc-keystores/nodeN/{keys,secrets,prysm,...}, ready to
+        # be served via nginx and pulled by individual validator pods.
+        #
+        # Each pod consumes the BIP-39 HD indices declared in its
+        # validatorKeys.indexStart..indexEnd range so the validator set baked
+        # into genesis.ssz matches what each vc actually signs with.
+        {{- $vcSlices := list }}
+        {{- range $i, $n := .Values.nodes }}
+          {{- if eq $n.role "validator" }}
+            {{- $start := default 0 (((default (dict) $n.validatorKeys).indexStart)) }}
+            {{- $end := default 0 (((default (dict) $n.validatorKeys).indexEnd)) }}
+            {{- $vcSlices = append $vcSlices (printf "%v:%v" $start $end) }}
+          {{- end }}
+        {{- end }}
+        {{- if $vcSlices }}
+        - name: gen-vc-keystores
+          image: {{ .Values.devnet.genesisGenerator.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: EL_AND_CL_MNEMONIC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rel }}-mnemonic
+                  key: mnemonic
+            - { name: VC_KEYSTORE_PASSWORD, value: devnet }
+            - { name: VC_SLICES, value: {{ join " " $vcSlices | quote }} }
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              if [ -d /data/vc-keystores/node1 ] && [ -n "$(ls -A /data/vc-keystores/node1 2>/dev/null)" ]; then
+                echo "vc-keystores already exist, skipping"
+                exit 0
+              fi
+              mkdir -p /data/vc-keystores
+              N=0
+              for slice in $VC_SLICES; do
+                N=$((N+1))
+                MIN=$(echo "$slice" | cut -d: -f1)
+                MAX=$(echo "$slice" | cut -d: -f2)
+                OUT="/data/vc-keystores/node$N"
+                echo "node$N: deriving validator keys [$MIN, $MAX) -> $OUT"
+                eth2-val-tools keystores \
+                  --insecure \
+                  --prysm-pass="$VC_KEYSTORE_PASSWORD" \
+                  --source-mnemonic="$EL_AND_CL_MNEMONIC" \
+                  --source-min "$MIN" \
+                  --source-max "$MAX" \
+                  --out-loc "$OUT"
+              done
+              ls -la /data/vc-keystores
+          volumeMounts:
+            - { name: data, mountPath: /data }
+        {{- end }}
+
+        # ── 3. Publish artefacts into nginx web root ─────────────────
+        - name: publish
+          image: {{ .Values.devnet.genesisService.image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              mkdir -p /web/el /web/cl /web/validators /web/metadata
+              # ethereum-genesis-generator 4.x layout: ALL artefacts in
+              # /data/metadata. Older layouts placed them in /data/{el,cl}/.
+              # Handle both — first try direct subdirs, then fall back to
+              # cherry-picking from /data/metadata.
+
+              # ── EL genesis.json ──────────────────────────────────────
+              if [ -f /data/el/genesis.json ]; then
+                cp /data/el/genesis.json /web/el/genesis.json
+              elif [ -f /data/genesis.json ]; then
+                cp /data/genesis.json /web/el/genesis.json
+              elif [ -f /data/metadata/genesis.json ]; then
+                cp /data/metadata/genesis.json /web/el/genesis.json
+              fi
+              # Optional alt-format chainspecs for non-geth EL clients.
+              [ -f /data/metadata/chainspec.json ] && cp /data/metadata/chainspec.json /web/el/chainspec.json
+              [ -f /data/metadata/besu.json ]      && cp /data/metadata/besu.json      /web/el/besu.json
+
+              # ── CL config + genesis state ────────────────────────────
+              if [ -d /data/cl ]; then
+                cp -r /data/cl/. /web/cl/
+              fi
+              if [ -d /data/custom_config_data ]; then
+                cp -r /data/custom_config_data/. /web/cl/
+              fi
+              # ethpandaops 4.x: config/ssz/deposit_block all live in /data/metadata
+              for f in config.yaml genesis.ssz \
+                       deposit_contract_block.txt \
+                       deposit_contract_block_hash.txt \
+                       deposit_contract.txt \
+                       genesis_validators_root.txt \
+                       bootstrap_nodes.txt; do
+                [ -f /data/metadata/$f ] && cp /data/metadata/$f /web/cl/$f || true
+              done
+              # Lighthouse insists on deploy_block.txt — alias to deposit_contract_block.txt
+              if [ -f /web/cl/deposit_contract_block.txt ] && [ ! -f /web/cl/deploy_block.txt ]; then
+                cp /web/cl/deposit_contract_block.txt /web/cl/deploy_block.txt
+              fi
+
+              # ── Validator keystores ─────────────────────────────────
+              # ethpandaops 4.x writes individual validator keys via
+              # /data/{validators,validator_keys}/. If neither exists, the
+              # validator stake is already baked into genesis.ssz (internal
+              # validators) and no keystore tar is needed — CL nodes will
+              # still produce blocks via the genesis-baked validator set.
+              if [ -d /data/validators ]; then
+                tar -C /data -cf /web/validators/keys.tar validators
+              elif [ -d /data/validator_keys ]; then
+                tar -C /data -cf /web/validators/keys.tar validator_keys
+              elif [ -d /data/staking-deposit-cli ]; then
+                tar -C /data -cf /web/validators/keys.tar staking-deposit-cli
+              else
+                echo "No discrete validator keystore tree (internal validators only)."
+              fi
+
+              # ── VC keystores (one tarball per validator pod) ───────
+              # gen-vc-keystores init writes /data/vc-keystores/nodeN/...
+              # We publish each nodeN tree as a single tar archive: recursive
+              # `wget -r` against nginx autoindex flattens directories (it
+              # follows sort-order HTML query links), so one-file-per-node is
+              # the reliable transport. Node pods fetch nodeN.tar then untar.
+              if [ -d /data/vc-keystores ]; then
+                mkdir -p /web/vc-keystores
+                for d in /data/vc-keystores/*/; do
+                  n=$(basename "$d")
+                  tar -C /data/vc-keystores -cf "/web/vc-keystores/${n}.tar" "$n"
+                done
+                ls -la /web/vc-keystores
+              fi
+
+              # ── Metadata catch-all (jwt etc.) ───────────────────────
+              if [ -d /data/metadata ]; then
+                cp -r /data/metadata/. /web/metadata/
+              fi
+              ls -laR /web | head -80
+              # Mark ready last — node init's wait-for-genesis polls /ready.
+              echo "ok" > /web/ready
+              echo "Published"
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: web,  mountPath: /web }
+
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 80 }
+          volumeMounts:
+            - { name: web, mountPath: /usr/share/nginx/html }
+            - { name: nginx-config, mountPath: /etc/nginx/conf.d/default.conf, subPath: default.conf }
+          readinessProbe:
+            httpGet: { path: /ready, port: 80 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with (or .Values.devnet.genesisService.persistence.storageClassName .Values.storageClass) }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.devnet.genesisService.persistence.size }}
+{{- end }}

@@ -1,0 +1,63 @@
+{{- if .Values.dora.enabled -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+{{- $name := printf "%s-dora" $rel -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        ethereum-network.io/role: peripheral
+    spec:
+      containers:
+        - name: dora
+          image: {{ .Values.dora.image.repository }}:{{ .Values.dora.image.tag }}
+          imagePullPolicy: {{ .Values.dora.image.pullPolicy | default "IfNotPresent" }}
+          args: ["-config=/config/config.yml"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: data,   mountPath: /data }
+          resources: {{- toYaml .Values.dora.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $rel }}-dora-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with (or .Values.dora.persistence.storageClassName .Values.storageClass) }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.dora.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
+{{- end }}

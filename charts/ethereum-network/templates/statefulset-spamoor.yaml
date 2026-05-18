@@ -1,0 +1,139 @@
+{{- if .Values.spamoor.enabled -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+{{- $name := printf "%s-spamoor" $rel -}}
+{{- $leader := include "ethereum-network.clLeaderName" . -}}
+{{- $rpc := printf "http://%s-%s:8545" $rel $leader -}}
+{{- $deriveSponsor := and (not .Values.spamoor.sponsorPrivateKey) (include "ethereum-network.effectiveMnemonic" .) -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        ethereum-network.io/role: peripheral
+    spec:
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $rel }}-spamoor-config
+        - { name: pk, emptyDir: {} }
+        {{- if $deriveSponsor }}
+        - name: script
+          configMap:
+            name: {{ $rel }}-derive-script
+        {{- end }}
+
+      initContainers:
+        - name: wait-rpc
+          image: {{ .Values.peerTable.image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              until curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+                --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+                {{ $rpc | quote }} >/dev/null 2>&1; do
+                echo "waiting for EL RPC at {{ $rpc }}..."
+                sleep 5
+              done
+              echo "RPC ready"
+        {{- if $deriveSponsor }}
+        # Derive the sponsor private key from the shared mnemonic at HD
+        # index 0 (the first premine wallet ethpandaops/genesis-generator
+        # funds by default). Writes /pk/privkey as raw hex (no 0x prefix).
+        - name: derive-sponsor
+          image: {{ .Values.peerTable.deriveImage }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: EL_INDEX,  value: "0" }
+            - { name: CL_INDEX,  value: "0" }
+            - { name: EL_OUT,    value: "/pk/privkey" }
+            - { name: CL_OUT,    value: "/pk/.unused-cl" }
+            - { name: CL_FORMAT, value: "prysm" }
+            - name: MNEMONIC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rel }}-mnemonic
+                  key: mnemonic
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -eu
+              pip install --quiet --no-cache-dir eth-account==0.13.4 base58==2.1.1
+              python3 /scripts/derive.py --mode keys
+              echo "Sponsor privkey derived (HD index 0, premine wallet 0)"
+          volumeMounts:
+            - { name: pk,     mountPath: /pk }
+            - { name: script, mountPath: /scripts }
+        {{- end }}
+
+      containers:
+        - name: spamoor
+          image: {{ .Values.spamoor.image.repository }}:{{ .Values.spamoor.image.tag }}
+          imagePullPolicy: {{ .Values.spamoor.image.pullPolicy | default "IfNotPresent" }}
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              {{- if .Values.spamoor.sponsorPrivateKey }}
+              PRIVKEY={{ .Values.spamoor.sponsorPrivateKey | quote }}
+              {{- else if $deriveSponsor }}
+              PRIVKEY=$(cat /pk/privkey)
+              {{- else }}
+              echo "ERROR: spamoor needs either spamoor.sponsorPrivateKey or a mnemonic"
+              exit 1
+              {{- end }}
+              exec /app/spamoor-daemon daemon \
+                --db=/data/spamoor.db \
+                --port=8080 \
+                --rpchost={{ $rpc | quote }} \
+                --privkey="$PRIVKEY" \
+                --startup-spammer=/config/startup-spammers.yaml \
+                --startup-delay=60 \
+                --verbose
+          ports:
+            - { name: http, containerPort: 8080 }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: pk,     mountPath: /pk,     readOnly: true }
+            - { name: data,   mountPath: /data }
+          resources: {{- toYaml .Values.spamoor.resources | nindent 12 }}
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with (or .Values.spamoor.persistence.storageClassName .Values.storageClass) }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.spamoor.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
+{{- end }}

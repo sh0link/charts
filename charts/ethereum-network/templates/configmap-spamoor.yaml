@@ -1,0 +1,12 @@
+{{- if .Values.spamoor.enabled -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $rel }}-spamoor-config
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+data:
+  startup-spammers.yaml: |
+{{ toYaml .Values.spamoor.scenarios | indent 4 }}
+{{- end }}

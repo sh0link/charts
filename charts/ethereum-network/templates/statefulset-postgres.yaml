@@ -1,0 +1,74 @@
+{{- if include "ethereum-network.needsPostgres" . -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+{{- $name := printf "%s-postgres" $rel -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        ethereum-network.io/role: peripheral
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/bash, -c]
+          # docker-entrypoint-initdb.d only runs on first PVC init. We create
+          # the blockscout database in a background subshell on every start
+          # so a fresh PVC (or a wiped one) re-creates it idempotently.
+          args:
+            - |
+              (
+                until pg_isready -U postgres -q; do sleep 2; done
+                psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='blockscout'" | grep -q 1 || \
+                  psql -U postgres -c "CREATE DATABASE blockscout;"
+                echo "blockscout database ready"
+              ) &
+              exec docker-entrypoint.sh postgres -c max_connections=200
+          env:
+            - { name: POSTGRES_USER,     value: postgres }
+            - { name: POSTGRES_PASSWORD, value: postgres }
+            - { name: PGDATA,            value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { name: pg, containerPort: 5432 }
+          resources: {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data, subPath: pgdata }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with (or .Values.postgres.persistence.storageClassName .Values.storageClass) }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - { name: pg, port: 5432, targetPort: 5432, protocol: TCP }
+{{- end }}

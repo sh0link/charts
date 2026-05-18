@@ -1,0 +1,44 @@
+{{/*
+VMServiceScrape per node. Gated by the helper which combines:
+  - .Values.vmServiceScrape.enabled
+  - Capabilities.APIVersions.Has "operator.victoriametrics.com/v1beta1/VMServiceScrape"
+
+This lets the chart deploy cleanly on clusters without the VM operator
+(e.g. local k3d) — the whole file evaluates to empty.
+*/}}
+{{- if include "ethereum-network.vmScrapeEnabled" . }}
+{{- $ctx := . -}}
+{{- range $i, $node := .Values.nodes }}
+{{- $name := printf "%s-%s" $ctx.Release.Name $node.name -}}
+{{/* Pick metric ports by name convention */}}
+{{- $endpoints := list -}}
+{{- range $node.el.ports -}}
+  {{- if hasPrefix "metric" .name -}}
+    {{- $endpoints = append $endpoints (dict "port" (printf "el-%s" .name) "path" "/debug/metrics/prometheus") -}}
+  {{- end -}}
+{{- end -}}
+{{- range $node.cl.ports -}}
+  {{- if hasPrefix "metric" .name -}}
+    {{- $endpoints = append $endpoints (dict "port" (printf "cl-%s" .name) "path" "/metrics") -}}
+  {{- end -}}
+{{- end -}}
+{{- if $endpoints }}
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  endpoints:
+  {{- range $endpoints }}
+    - port: {{ .port }}
+      path: {{ .path }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

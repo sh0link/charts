@@ -1,0 +1,26 @@
+apiVersion: v2
+name: ethereum-network
+description: |
+  A Helm chart for deploying Ethereum networks end-to-end. Two top-level modes:
+
+  - devnet — bootstrap a brand-new network from scratch via
+    ethpandaops/ethereum-genesis-generator. Genesis files are served by an
+    in-cluster nginx so every node fetches the same canonical artifacts.
+
+  - join — attach nodes to an existing network. Two sub-sources:
+      public  → mainnet / sepolia / holesky / hoodi (EL/CL built-in genesis,
+                checkpoint-sync default URL per network).
+      custom  → any devnet by pointing at its genesis service URL.
+
+  Multi-node topology is declared as values.nodes[] and each entry can pick
+  its own EL client (geth / reth / erigon / nethermind / besu) and CL client
+  (lighthouse / prysm / teku / nimbus). All nodes share a deterministic P2P
+  key set derived from a single mnemonic (HD index 100+), enabling every
+  node to be added to every other node's trusted-peer list before any pod
+  starts.
+
+  Optional peripherals: postgres, dora-explorer, blockscout, spamoor.
+  VMServiceScrape resources are emitted only when the CRD is installed.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

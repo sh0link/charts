@@ -1,0 +1,19 @@
+{{- if include "ethereum-network.needsGenesis" . -}}
+{{- $name := printf "%s-genesis" (include "ethereum-network.fullname" .) -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+{{- end }}

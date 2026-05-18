@@ -1,0 +1,231 @@
+# Bootstrap a brand-new devnet (1 validator + 1 rpc) from scratch.
+#
+# Install:
+#   helm install dev1 ./charts/charts/ethereum-network -n eth --create-namespace \
+#     -f charts/charts/ethereum-network/examples/devnet-minimal.yaml
+#
+# Genesis takes ~30s (default genesisDelay) to be generated. Node pods will
+# block on wait-for-genesis until ready, then fetch artefacts and self-init.
+
+mode: devnet
+
+baseDomain: example.org
+
+devnet:
+  chainId: 32382
+  preset: minimal
+  validatorCount: 64
+  genesisGenerator:
+    image: ethpandaops/ethereum-genesis-generator:4.0.0
+    elFork: cancun
+    clFork: deneb
+    genesisDelay: 30
+    mnemonic: "test test test test test test test test test test test alone"
+  genesisService:
+    image: ghcr.io/sh0link/debugger:1.0.0
+    port: 80
+    persistence:
+      size: 1Gi
+
+# Deterministic P2P identity:
+#   p2pKey.enabled    → each node derives its EL nodekey + CL libp2p secret
+#                        from the shared mnemonic at HD index >= indexStart.
+#   peerTable.enabled → a Job derives every node's enode + libp2p peer ID
+#                        and writes a ConfigMap that all node pods mount.
+# geth nodes pick up enode list automatically (static-nodes.json drop-in).
+# lighthouse needs --libp2p-private-key-file in its command (see below).
+peerTable:
+  enabled: true
+p2pKey:
+  enabled: true
+  indexStart: 100
+
+nodes:
+  - name: validator1
+    role: validator
+    el:
+      client: geth
+      image:
+        repository: ethereum/client-go
+        tag: v1.16.9
+      dataPath: /data/ethereum
+      command:
+        - geth
+        # wait-and-apply-peer-table init builds /peers/geth-config.toml with
+        # [Node.P2P] StaticNodes/TrustedNodes pointing at every node in the release.
+        - --config=/peers/geth-config.toml
+        - --datadir=/data/ethereum
+        - --networkid=32382
+        - --syncmode=full
+        - --gcmode=archive
+        - --state.scheme=path
+        - --http
+        - --http.api=eth,net,web3,debug,txpool,admin
+        - --http.addr=0.0.0.0
+        - --http.vhosts=*
+        - --http.corsdomain=*
+        - --ws
+        - --ws.addr=0.0.0.0
+        - --authrpc.port=8551
+        - --authrpc.addr=0.0.0.0
+        - --authrpc.vhosts=*
+        - --authrpc.jwtsecret=/jwt/jwtsecret
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port=6061
+        # discovery on so static-nodes peers can DNS-resolve each other;
+        # set --discovery.dns="" to suppress public DNS bootstraps.
+        - --discovery.dns=
+        - --maxpeers=10
+        - --port=30303
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "2",  memory: 4Gi }
+      persistence:
+        size: 20Gi
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+    cl:
+      client: lighthouse
+      image:
+        repository: sigp/lighthouse
+        tag: v7.1.0
+      dataPath: /data/lighthouse
+      commandShell: true
+      command:
+        - |
+          # derive-p2p-key wrote /data/lighthouse/beacon/network/key (raw 32B
+          # binary, lighthouse default location), so the published peer_id in
+          # cl-peer-table matches the one this beacon advertises.
+          #
+          # POD_IP is injected via downward API; without --enr-address the
+          # ENR's ip4 field is None and peers can't dial back.
+          #
+          # Optional boot-nodes file is written by the cl-peer-discovery init
+          # container (debugger sidecar). It contains the leader's ENR. The
+          # leader itself starts with an empty file; followers then connect
+          # back automatically.
+          BOOT_NODES=""
+          if [ -s /shared/cl-bootnodes.txt ]; then
+            BOOT_NODES="--boot-nodes=$(cat /shared/cl-bootnodes.txt)"
+          fi
+          exec lighthouse beacon_node \
+            --datadir=/data/lighthouse \
+            --testnet-dir=/shared/metadata \
+            --http --http-address=0.0.0.0 --http-port=5052 --http-allow-origin='*' \
+            --metrics --metrics-address=0.0.0.0 --metrics-port=5054 \
+            --port=9000 --listen-address=0.0.0.0 \
+            --execution-endpoint=http://localhost:8551 \
+            --execution-jwt=/jwt/jwtsecret \
+            --enable-private-discovery \
+            --enr-address="$POD_IP" \
+            --enr-tcp-port=9000 \
+            --enr-udp-port=9000 \
+            --enr-quic-port=9001 \
+            --allow-insecure-genesis-sync \
+            --subscribe-all-subnets \
+            $BOOT_NODES \
+            --suggested-fee-recipient=0x0000000000000000000000000000000000000000
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "1",  memory: 4Gi }
+      persistence:
+        size: 10Gi
+      ports:
+        - { name: beacon, port: 5052 }
+        - { name: p2p,    port: 9000 }
+        - { name: metric, port: 5054 }
+    validatorKeys:
+      indexStart: 0
+      indexEnd: 64
+
+  - name: rpc1
+    role: rpc
+    el:
+      client: geth
+      image:
+        repository: ethereum/client-go
+        tag: v1.16.9
+      dataPath: /data/ethereum
+      command:
+        - geth
+        # wait-and-apply-peer-table init builds /peers/geth-config.toml with
+        # [Node.P2P] StaticNodes/TrustedNodes pointing at every node in the release.
+        - --config=/peers/geth-config.toml
+        - --datadir=/data/ethereum
+        - --networkid=32382
+        - --syncmode=full
+        - --gcmode=archive
+        - --state.scheme=path
+        - --http
+        - --http.api=eth,net,web3,debug,txpool
+        - --http.addr=0.0.0.0
+        - --http.vhosts=*
+        - --http.corsdomain=*
+        - --ws
+        - --ws.addr=0.0.0.0
+        - --authrpc.port=8551
+        - --authrpc.addr=0.0.0.0
+        - --authrpc.vhosts=*
+        - --authrpc.jwtsecret=/jwt/jwtsecret
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port=6061
+        - --maxpeers=10
+        - --port=30303
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "2",  memory: 4Gi }
+      persistence:
+        size: 20Gi
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+    cl:
+      client: lighthouse
+      image:
+        repository: sigp/lighthouse
+        tag: v7.1.0
+      dataPath: /data/lighthouse
+      commandShell: true
+      command:
+        - |
+          # Follower bootstrap: cl-peer-discovery init wrote the leader's
+          # ENR to /shared/cl-bootnodes.txt. POD_IP advertised via ENR so the
+          # leader can dial us back.
+          BOOT_NODES=""
+          if [ -s /shared/cl-bootnodes.txt ]; then
+            BOOT_NODES="--boot-nodes=$(cat /shared/cl-bootnodes.txt)"
+          fi
+          exec lighthouse beacon_node \
+            --datadir=/data/lighthouse \
+            --testnet-dir=/shared/metadata \
+            --http --http-address=0.0.0.0 --http-port=5052 --http-allow-origin='*' \
+            --metrics --metrics-address=0.0.0.0 --metrics-port=5054 \
+            --port=9000 --listen-address=0.0.0.0 \
+            --execution-endpoint=http://localhost:8551 \
+            --execution-jwt=/jwt/jwtsecret \
+            --enable-private-discovery \
+            --enr-address="$POD_IP" \
+            --enr-tcp-port=9000 \
+            --enr-udp-port=9000 \
+            --enr-quic-port=9001 \
+            --allow-insecure-genesis-sync \
+            --subscribe-all-subnets \
+            $BOOT_NODES
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "1",  memory: 4Gi }
+      persistence:
+        size: 10Gi
+      ports:
+        - { name: beacon, port: 5052 }
+        - { name: p2p,    port: 9000 }
+        - { name: metric, port: 5054 }

@@ -1,0 +1,36 @@
+{{- if include "ethereum-network.needsGenesis" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ethereum-network.fullname" . }}-genesis-nginx
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name _;
+
+      # Serve generated genesis artefacts straight from the web root.
+      # Layout produced by ethereum-genesis-generator:
+      #   /el/genesis.json
+      #   /cl/config.yaml
+      #   /cl/genesis.ssz
+      #   /cl/deposit_contract_block.txt
+      #   /validators/keys.tar           (bundled by the second init container)
+      #   /metadata/                     (jwt, mnemonic-derived bits, etc.)
+      root /usr/share/nginx/html;
+
+      # autoindex helps human debugging — devnet only, no PII risk.
+      location / {
+        autoindex on;
+      }
+
+      # /ready returns 200 only after the generator-then-publish init chain
+      # has touched /usr/share/nginx/html/ready. Node init containers poll
+      # this path so they never race the generator.
+      location = /ready {
+        try_files $uri =503;
+      }
+    }
+{{- end }}

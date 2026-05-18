@@ -1,0 +1,98 @@
+# Join the public Ethereum mainnet as a single archive RPC node.
+#
+# Install:
+#   helm install mainnet ./charts/charts/ethereum-network -n eth --create-namespace \
+#     -f charts/charts/ethereum-network/examples/join-public-mainnet.yaml
+
+mode: join
+join:
+  source: public
+  public:
+    network: mainnet
+    # Default: https://beaconstate.info — set explicitly to pin a specific
+    # checkpoint provider in production.
+
+baseDomain: example.org
+
+peerTable:
+  enabled: false
+p2pKey:
+  enabled: false
+
+nodes:
+  - name: archive1
+    role: rpc
+    el:
+      client: geth
+      image:
+        repository: ethereum/client-go
+        tag: v1.16.9
+      dataPath: /data/ethereum
+      command:
+        - geth
+        - --mainnet
+        - --gcmode=archive
+        - --state.scheme=path
+        - --datadir=/data/ethereum
+        - --verbosity=3
+        - --http
+        - --http.api=eth,net,web3,debug,txpool,admin
+        - --http.addr=0.0.0.0
+        - --http.vhosts=*
+        - --http.corsdomain=*
+        - --ws
+        - --ws.addr=0.0.0.0
+        - --authrpc.port=8551
+        - --authrpc.addr=0.0.0.0
+        - --authrpc.jwtsecret=/jwt/jwtsecret
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port=6061
+        - --metrics.expensive
+        - --maxpeers=100
+        - --cache=4096
+      resources:
+        requests: { cpu: "4", memory: 16Gi }
+        limits:   { cpu: "8", memory: 24Gi }
+      persistence:
+        # Mainnet archive footprint is ~16TB and growing; size up for prod.
+        size: 1800Gi
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+    cl:
+      client: lighthouse
+      image:
+        repository: sigp/lighthouse
+        tag: v8.1.1
+      dataPath: /data/lighthouse
+      command:
+        - lighthouse
+        - beacon_node
+        - --datadir=/data/lighthouse
+        - --network=mainnet
+        - --checkpoint-sync-url=https://beaconstate.info
+        - --disable-deposit-contract-sync
+        - --http
+        - --http-address=0.0.0.0
+        - --http-port=5052
+        - --metrics
+        - --metrics-address=0.0.0.0
+        - --metrics-port=5054
+        - --port=9000
+        - --listen-address=0.0.0.0
+        - --execution-endpoint=http://localhost:8551
+        - --execution-jwt=/jwt/jwtsecret
+        - --suggested-fee-recipient=0x0000000000000000000000000000000000000000
+      resources:
+        requests: { cpu: "2", memory: 8Gi }
+        limits:   { cpu: "4", memory: 16Gi }
+      persistence:
+        size: 200Gi
+      ports:
+        - { name: beacon,  port: 5052 }
+        - { name: p2p,     port: 9000 }
+        - { name: metric,  port: 5054 }

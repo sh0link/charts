@@ -1,0 +1,284 @@
+# Heterogeneous devnet (Fusaka/Fulu): 3 validators + 1 RPC, each combo:
+#   validator1: geth + lighthouse
+#   validator2: reth + prysm
+#   validator3: geth + teku
+#   rpc1:       reth + lighthouse
+#
+# Install:
+#   helm install ethereum-devnet-1 ./charts/charts/ethereum-network -n infra --create-namespace \
+#     -f charts/charts/ethereum-network/examples/devnet-full.yaml \
+#     --set dora.enabled=true --set spamoor.enabled=true --set blockscout.enabled=true
+
+mode: devnet
+baseDomain: local.sh0.link
+domainSuffixEnabled: false
+
+devnet:
+  chainId: 32382
+  preset: minimal
+  validatorCount: 192            # 64 per validator × 3
+  genesisGenerator:
+    image: ethpandaops/ethereum-genesis-generator:6.0.7
+    elFork: fusaka
+    clFork: fulu
+    genesisDelay: 30
+    mnemonic: "test test test test test test test test test test test alone"
+  genesisService:
+    image: ghcr.io/sh0link/debugger:1.0.0
+    persistence: { size: 1Gi }
+
+p2pKey:
+  enabled: true
+  indexStart: 100               # 4 nodes consume 100..107
+
+peerTable:
+  enabled: true
+
+# ── shared geth ───────────────────────────────────────────────────────
+_geth_command: &geth_command
+  - geth
+  - --config=/peers/geth-config.toml
+  - --datadir=/data/ethereum
+  - --networkid=32382
+  - --syncmode=full
+  - --gcmode=archive
+  - --state.scheme=path
+  - --http
+  - --http.api=eth,net,web3,debug,txpool,admin
+  - --http.addr=0.0.0.0
+  - --http.vhosts=*
+  - --http.corsdomain=*
+  - --ws
+  - --ws.addr=0.0.0.0
+  - --authrpc.port=8551
+  - --authrpc.addr=0.0.0.0
+  - --authrpc.vhosts=*
+  - --authrpc.jwtsecret=/jwt/jwtsecret
+  - --metrics
+  - --metrics.addr=0.0.0.0
+  - --metrics.port=6061
+  - --discovery.dns=
+  - --maxpeers=10
+  - --port=30303
+
+_geth_node: &geth_node
+  client: geth
+  image: { repository: ethereum/client-go, tag: v1.17.3 }
+  dataPath: /data/ethereum
+  command: *geth_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 4Gi }
+  persistence: { size: 20Gi }
+  ports:
+    - { name: rpc,     port: 8545 }
+    - { name: ws,      port: 8546 }
+    - { name: authrpc, port: 8551 }
+    - { name: p2p,     port: 30303 }
+    - { name: metric,  port: 6061 }
+
+# ── shared reth (commandShell — for $(cat csv) expansion) ────────────
+_reth_command: &reth_command
+  - |
+    TRUSTED=""
+    if [ -s /peers/el-static-nodes.csv ]; then
+      TRUSTED="--trusted-peers=$(cat /peers/el-static-nodes.csv)"
+    fi
+    exec reth node \
+      --chain=/shared/el-genesis.json \
+      --datadir=/data/ethereum \
+      --port=30303 \
+      --http --http.addr=0.0.0.0 --http.api=eth,net,web3,debug,txpool \
+      --ws --ws.addr=0.0.0.0 --ws.api=eth,net,web3 \
+      --authrpc.port=8551 --authrpc.addr=0.0.0.0 \
+      --authrpc.jwtsecret=/jwt/jwtsecret \
+      --metrics=0.0.0.0:6061 \
+      --p2p-secret-key=/data/ethereum/nodekey \
+      $TRUSTED
+
+_reth_node: &reth_node
+  client: reth
+  image: { repository: ghcr.io/paradigmxyz/reth, tag: v2.2.0 }
+  dataPath: /data/ethereum
+  commandShell: true
+  command: *reth_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 4Gi }
+  persistence: { size: 20Gi }
+  ports:
+    - { name: rpc,     port: 8545 }
+    - { name: ws,      port: 8546 }
+    - { name: authrpc, port: 8551 }
+    - { name: p2p,     port: 30303 }
+    - { name: metric,  port: 6061 }
+
+# ── shared lighthouse ────────────────────────────────────────────────
+_lh_command: &lh_command
+  - |
+    BOOT_NODES=""
+    if [ -s /shared/cl-bootnodes.txt ]; then
+      BOOT_NODES="--boot-nodes=$(cat /shared/cl-bootnodes.txt)"
+    fi
+    exec lighthouse beacon_node \
+      --datadir=/data/lighthouse \
+      --testnet-dir=/shared/metadata \
+      --http --http-address=0.0.0.0 --http-port=5052 --http-allow-origin='*' \
+      --metrics --metrics-address=0.0.0.0 --metrics-port=5054 \
+      --port=9000 --listen-address=0.0.0.0 \
+      --execution-endpoint=http://localhost:8551 \
+      --execution-jwt=/jwt/jwtsecret \
+      --enable-private-discovery \
+      --enr-address="$POD_IP" \
+      --enr-tcp-port=9000 \
+      --enr-udp-port=9000 \
+      --enr-quic-port=9001 \
+      --allow-insecure-genesis-sync \
+      --subscribe-all-subnets \
+      $BOOT_NODES \
+      --suggested-fee-recipient=0x0000000000000000000000000000000000000000
+
+_lh_node: &lh_node
+  client: lighthouse
+  image: { repository: sigp/lighthouse, tag: v8.1.3 }
+  dataPath: /data/lighthouse
+  commandShell: true
+  command: *lh_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "1",  memory: 4Gi }
+  persistence: { size: 10Gi }
+  ports:
+    - { name: beacon, port: 5052 }
+    - { name: p2p,    port: 9000 }
+    - { name: metric, port: 5054 }
+
+# ── shared prysm ─────────────────────────────────────────────────────
+_prysm_command: &prysm_command
+  - |
+    BOOT_FLAG=""
+    if [ -s /shared/cl-bootnodes.txt ]; then
+      BOOT_FLAG="--bootstrap-node=$(cat /shared/cl-bootnodes.txt)"
+    fi
+    # docker-hub image (prysmaticlabs/prysm-beacon-chain) puts the binary
+    # at /beacon-chain; gcr "prysm/beacon-chain" image keeps it at
+    # /app/cmd/beacon-chain/beacon-chain. Pick whichever exists.
+    BIN=/beacon-chain
+    [ -x /app/cmd/beacon-chain/beacon-chain ] && BIN=/app/cmd/beacon-chain/beacon-chain
+    exec $BIN \
+      --datadir=/data/prysm \
+      --chain-config-file=/shared/metadata/config.yaml \
+      --genesis-state=/shared/metadata/genesis.ssz \
+      --rpc-host=0.0.0.0 \
+      --grpc-gateway-host=0.0.0.0 \
+      --grpc-gateway-port=5052 \
+      --http-modules=eth,net,web3 \
+      --monitoring-host=0.0.0.0 \
+      --monitoring-port=5054 \
+      --p2p-tcp-port=9000 \
+      --p2p-udp-port=9000 \
+      --p2p-host-ip="$POD_IP" \
+      --p2p-priv-key=/data/prysm/network-keys \
+      --min-sync-peers=1 \
+      --execution-endpoint=http://localhost:8551 \
+      --jwt-secret=/jwt/jwtsecret \
+      --accept-terms-of-use \
+      --suggested-fee-recipient=0x0000000000000000000000000000000000000000 \
+      $BOOT_FLAG
+
+_prysm_node: &prysm_node
+  client: prysm
+  # Use docker-hub image (gcr.io blob downloads frequently 500 on this cluster).
+  image: { repository: prysmaticlabs/prysm-beacon-chain, tag: v7.1.3 }
+  # vc binary lives in a separate image — chart picks this up via cl.vcImage.
+  vcImage: { repository: prysmaticlabs/prysm-validator, tag: v7.1.3 }
+  dataPath: /data/prysm
+  commandShell: true
+  command: *prysm_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "1",  memory: 4Gi }
+  persistence: { size: 10Gi }
+  ports:
+    - { name: beacon, port: 5052 }
+    - { name: p2p,    port: 9000 }
+    - { name: metric, port: 5054 }
+
+# ── shared teku ──────────────────────────────────────────────────────
+# --log-destination=CONSOLE avoids teku trying to write /data/teku/logs/
+# which fails when the PVC is fresh and owned by root but teku runs as
+# a non-root user.
+_teku_command: &teku_command
+  - |
+    # Teku 26.x rejects config.yaml that has both SLOT_DURATION_MS and
+    # SECONDS_PER_SLOT (calls them inconsistent even though they refer to
+    # different units). ethpandaops generator 6.0.7 writes both in minimal
+    # preset. Strip SLOT_DURATION_MS into a copy. We write to /shared
+    # (emptyDir, world-writable) because the PVC /data/teku is owned by
+    # root from the chart's init container, but teku itself runs as a
+    # non-root user.
+    sed '/^SLOT_DURATION_MS:/d' /shared/metadata/config.yaml > /shared/teku-config.yaml
+    BOOT_FLAG=""
+    if [ -s /shared/cl-bootnodes.txt ]; then
+      BOOT_FLAG="--p2p-discovery-bootnodes=$(cat /shared/cl-bootnodes.txt)"
+    fi
+    exec /opt/teku/bin/teku \
+      --data-base-path=/data/teku \
+      --network=/shared/teku-config.yaml \
+      --initial-state=/shared/metadata/genesis.ssz \
+      --log-destination=CONSOLE \
+      --p2p-port=9000 \
+      --p2p-advertised-ip="$POD_IP" \
+      --p2p-advertised-port=9000 \
+      --p2p-private-key-file=/data/teku/p2p-key \
+      --rest-api-enabled=true \
+      --rest-api-host-allowlist='*' \
+      --rest-api-interface=0.0.0.0 \
+      --rest-api-port=5052 \
+      --metrics-enabled=true \
+      --metrics-host-allowlist='*' \
+      --metrics-interface=0.0.0.0 \
+      --metrics-port=5054 \
+      --ee-endpoint=http://localhost:8551 \
+      --ee-jwt-secret-file=/jwt/jwtsecret \
+      $BOOT_FLAG
+
+_teku_node: &teku_node
+  client: teku
+  image: { repository: consensys/teku, tag: "26.4.0" }
+  dataPath: /data/teku
+  commandShell: true
+  command: *teku_command
+  resources:
+    requests: { cpu: 500m, memory: 2Gi }
+    limits:   { cpu: "1",  memory: 4Gi }
+  persistence: { size: 10Gi }
+  ports:
+    - { name: beacon, port: 5052 }
+    - { name: p2p,    port: 9000 }
+    - { name: metric, port: 5054 }
+
+# ── topology ─────────────────────────────────────────────────────────
+nodes:
+  - name: validator1
+    role: validator
+    el: *geth_node
+    cl: *lh_node
+    validatorKeys: { indexStart: 0,   indexEnd: 64 }
+
+  - name: validator2
+    role: validator
+    el: *reth_node
+    cl: *lh_node
+    validatorKeys: { indexStart: 64,  indexEnd: 128 }
+
+  - name: validator3
+    role: validator
+    el: *geth_node
+    cl: *lh_node
+    validatorKeys: { indexStart: 128, indexEnd: 192 }
+
+  - name: rpc1
+    role: rpc
+    el: *reth_node
+    cl: *lh_node

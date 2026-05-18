@@ -1,0 +1,39 @@
+{{/*
+One headless Service per node.
+
+Headless (clusterIP: None) is mandatory because enode URLs and libp2p
+multiaddrs in the peer-table ConfigMap embed the pod's DNS name; if we used
+a normal ClusterIP service, the underlying pod IP could change on restart
+without the enode URL updating.
+*/}}
+{{- $ctx := . -}}
+{{- range $i, $node := .Values.nodes }}
+{{- $name := printf "%s-%s" $ctx.Release.Name $node.name }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" $ctx | nindent 4 }}
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: {{ $name }}
+  ports:
+    {{- range $node.el.ports }}
+    - name: el-{{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .port }}
+      protocol: TCP
+    {{- end }}
+    {{- range $node.cl.ports }}
+    - name: cl-{{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .port }}
+      protocol: TCP
+    {{- end }}
+{{- end }}

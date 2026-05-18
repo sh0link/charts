@@ -1,0 +1,99 @@
+{{- if include "ethereum-network.peerTableEnabled" . -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+{{- $jobName := printf "%s-derive-peer-table" $rel -}}
+{{/*
+The Job runs once at install / upgrade. It produces the {release}-peer-table
+ConfigMap that node init containers wait for. Node init containers retry,
+so even if the Job lags briefly behind sts creation, the chain self-heals.
+
+We do NOT register as a Helm hook because:
+  1. mnemonic Secret and derive-script ConfigMap are needed by the Job pod;
+     they are normal release resources and would not exist during pre-install
+     hooks.
+  2. node sts already wait for the peer-table ConfigMap via init container,
+     so ordering is enforced at the kubelet level instead of via helm hooks.
+
+On upgrade, we use a job-name suffix derived from a digest of values so the
+Job is recreated when relevant inputs change. helm itself rejects mutation
+of immutable Job spec, so a name change triggers a fresh Job.
+*/}}
+{{- $seed := printf "%s-%d-%s" .Values.mode (len .Values.nodes) (include "ethereum-network.effectiveMnemonic" .) -}}
+{{- $suffix := $seed | sha256sum | trunc 8 -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $jobName }}-{{ $suffix }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $jobName }}
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: {{ $jobName }}
+    spec:
+      serviceAccountName: {{ $rel }}-peer-table
+      restartPolicy: OnFailure
+      volumes:
+        - name: script
+          configMap:
+            name: {{ $rel }}-derive-script
+        - { name: out, emptyDir: {} }
+      initContainers:
+        # python derive — produces /out/{el-static-nodes.{txt,json},cl-trusted-peers.txt}
+        - name: derive
+          image: {{ .Values.peerTable.deriveImage }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MNEMONIC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rel }}-mnemonic
+                  key: mnemonic
+            - { name: INDEX_START, value: {{ .Values.p2pKey.indexStart | quote }} }
+            - { name: RELEASE,     value: {{ $rel | quote }} }
+            - { name: NAMESPACE,   value: {{ .Release.Namespace | quote }} }
+            - { name: OUT_DIR,     value: /out }
+            - name: NODES_JSON
+              value: {{ .Values.nodes | toJson | quote }}
+          volumeMounts:
+            - { name: script, mountPath: /scripts }
+            - { name: out,    mountPath: /out }
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -eu
+              pip install --quiet --no-cache-dir eth-account==0.13.4 base58==2.1.1
+              python3 /scripts/derive.py --mode peers
+              ls -la /out
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      containers:
+        # kubectl apply — turns /out files into the {release}-peer-table ConfigMap
+        - name: apply
+          image: bitnamilegacy/kubectl:1.31
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: NAMESPACE, value: {{ .Release.Namespace | quote }} }
+            - { name: RELEASE,   value: {{ $rel | quote }} }
+          volumeMounts:
+            - { name: out, mountPath: /out }
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -eu
+              kubectl create configmap "$RELEASE-peer-table" \
+                -n "$NAMESPACE" \
+                --from-file=el-static-nodes.txt=/out/el-static-nodes.txt \
+                --from-file=el-static-nodes.json=/out/el-static-nodes.json \
+                --from-file=cl-trusted-peers.txt=/out/cl-trusted-peers.txt \
+                --dry-run=client -o yaml \
+                | kubectl apply -f -
+              echo "Peer table published"
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+{{- end }}
