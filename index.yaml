@@ -1,5 +1,28 @@
 apiVersion: v1
 entries:
+  ethereum-network:
+  - apiVersion: v2
+    appVersion: 1.0.0
+    created: "2026-05-18T10:45:28.77523198Z"
+    description: 'A Helm chart for deploying Ethereum networks end-to-end. Two top-level
+      modes:  - devnet — bootstrap a brand-new network from scratch via   ethpandaops/ethereum-genesis-generator.
+      Genesis files are served by an   in-cluster nginx so every node fetches the
+      same canonical artifacts.  - join — attach nodes to an existing network. Two
+      sub-sources:     public  → mainnet / sepolia / holesky / hoodi (EL/CL built-in
+      genesis,               checkpoint-sync default URL per network).     custom  →
+      any devnet by pointing at its genesis service URL.  Multi-node topology is declared
+      as values.nodes[] and each entry can pick its own EL client (geth / reth / erigon
+      / nethermind / besu) and CL client (lighthouse / prysm / teku / nimbus). All
+      nodes share a deterministic P2P key set derived from a single mnemonic (HD index
+      100+), enabling every node to be added to every other node''s trusted-peer list
+      before any pod starts.  Optional peripherals: postgres, dora-explorer, blockscout,
+      spamoor. VMServiceScrape resources are emitted only when the CRD is installed. '
+    digest: fe1a0ab879ae7bc7137993539eaa5237d045f291d4078dec0628f198e7df38db
+    name: ethereum-network
+    type: application
+    urls:
+    - https://github.com/sh0link/charts/releases/download/ethereum-network-0.1.0/ethereum-network-0.1.0.tgz
+    version: 0.1.0
   general-app:
   - apiVersion: v2
     appVersion: 1.16.0
@@ -41,4 +64,4 @@ entries:
     urls:
     - https://github.com/sh0link/charts/releases/download/general-app-0.1.0/general-app-0.1.0.tgz
     version: 0.1.0
-generated: "2026-01-29T03:02:44.763308661Z"
+generated: "2026-05-18T10:45:28.775248294Z"
