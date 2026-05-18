@@ -1,0 +1,129 @@
+{{- if .Values.ingress.enabled -}}
+{{- $ctx := . -}}
+{{- $rel := .Release.Name -}}
+{{- $className := .Values.ingress.className -}}
+{{- range $i, $node := .Values.nodes }}
+{{- $name := printf "%s-%s" $rel $node.name }}
+{{/*
+Build the rule list from the node's exposed ports. We surface only the
+user-facing ports here — metric ports are scraped via VMServiceScrape,
+p2p ports are pod-to-pod via the headless service.
+*/}}
+{{- $rules := list -}}
+{{- range $node.el.ports -}}
+  {{- if or (eq .name "rpc") (eq .name "ws") -}}
+    {{- $rules = append $rules (dict "port" .name "number" .port) -}}
+  {{- end -}}
+{{- end -}}
+{{- range $node.cl.ports -}}
+  {{- if eq .name "beacon" -}}
+    {{- $rules = append $rules (dict "port" .name "number" .port) -}}
+  {{- end -}}
+{{- end -}}
+{{- if $rules }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" $ctx | nindent 4 }}
+    app: {{ $name }}
+  {{- with $ctx.Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ $className }}
+  rules:
+  {{- range $rule := $rules }}
+    - host: {{ include "ethereum-network.host" (dict "release" $rel "svc" $node.name "port" $rule.port "ctx" $ctx) }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port:
+                  number: {{ $rule.number }}
+  {{- end }}
+  {{- with $ctx.Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}
+
+{{- if include "ethereum-network.needsGenesis" . }}
+{{- $genesisName := printf "%s-genesis" .Release.Name }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $genesisName }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $genesisName }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ include "ethereum-network.host" (dict "release" .Release.Name "svc" "genesis" "port" "http" "ctx" .) }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $genesisName }}
+                port:
+                  number: 80
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+
+{{/* Peripheral ingresses — same hostname scheme as node services so users
+     don't need a separate base domain table to find them. */}}
+{{- $peripherals := list }}
+{{- if .Values.dora.enabled }}{{- $peripherals = append $peripherals (dict "name" "dora" "port" 8080) }}{{- end }}
+{{- if .Values.spamoor.enabled }}{{- $peripherals = append $peripherals (dict "name" "spamoor" "port" 8080) }}{{- end }}
+{{- if .Values.blockscout.enabled }}{{- $peripherals = append $peripherals (dict "name" "blockscout" "port" 4000) }}{{- end }}
+{{- range $p := $peripherals }}
+{{- $svcName := printf "%s-%s" $.Release.Name $p.name }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $svcName }}
+  labels:
+    {{- include "ethereum-network.labels" $ | nindent 4 }}
+    app: {{ $svcName }}
+  {{- with $.Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ $.Values.ingress.className }}
+  rules:
+    - host: {{ include "ethereum-network.host" (dict "release" $.Release.Name "svc" $p.name "port" "http" "ctx" $) }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $svcName }}
+                port:
+                  number: {{ $p.port }}
+  {{- with $.Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

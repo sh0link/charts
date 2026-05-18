@@ -1,0 +1,32 @@
+{{ include "ethereum-network.fullname" . }} — mode: {{ .Values.mode }}{{ if include "ethereum-network.isJoin" . }} ({{ .Values.join.source }}){{ end }}
+
+{{ if include "ethereum-network.isJoinPublic" . -}}
+Joining public network: {{ .Values.join.public.network }}
+Checkpoint sync URL:    {{ include "ethereum-network.effectiveCheckpointUrl" . }}
+{{- end }}
+{{- if include "ethereum-network.isJoinCustom" . }}
+Joining custom devnet via: {{ .Values.join.custom.genesisUrl }}
+{{- end }}
+{{- if include "ethereum-network.isDevnet" . }}
+Generating a new devnet (chainId {{ .Values.devnet.chainId }}, {{ .Values.devnet.validatorCount }} validators).
+Genesis service: http://{{ include "ethereum-network.fullname" . }}-genesis
+{{- end }}
+
+Nodes ({{ len .Values.nodes }}):
+{{- $ctx := . }}
+{{- range $i, $node := .Values.nodes }}
+  - {{ $node.name }}  role={{ $node.role }}  el={{ $node.el.client }}  cl={{ $node.cl.client }}{{ if $ctx.Values.p2pKey.enabled }}  el-idx={{ include "ethereum-network.elKeyIndex" (dict "ordinal" $i "node" $node "ctx" $ctx) }}  cl-idx={{ include "ethereum-network.clKeyIndex" (dict "ordinal" $i "node" $node "ctx" $ctx) }}{{ end }}
+{{- end }}
+
+{{ if include "ethereum-network.peerTableEnabled" . -}}
+Deterministic peer mesh is enabled. The peer-table Job derives every node's
+enode and libp2p peer ID from the shared mnemonic and writes them to
+ConfigMap {{ include "ethereum-network.fullname" . }}-peer-table.
+{{- end }}
+
+{{ if .Values.ingress.enabled -}}
+Sample ingress hosts (port = rpc):
+{{- range $i, $node := .Values.nodes }}
+  http{{ if $ctx.Values.ingress.tls }}s{{ end }}://{{ include "ethereum-network.host" (dict "release" $ctx.Release.Name "svc" $node.name "port" "rpc" "ctx" $ctx) }}
+{{- end }}
+{{- end }}

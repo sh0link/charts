@@ -1,0 +1,133 @@
+{{- if .Values.blockscout.enabled -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+{{- $name := printf "%s-blockscout" $rel -}}
+{{- $elName := .Values.blockscout.elNodeName | default (include "ethereum-network.clLeaderName" .) -}}
+{{- $elHost := printf "%s-%s" $rel $elName -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        ethereum-network.io/role: peripheral
+    spec:
+      volumes:
+        - { name: config, emptyDir: {} }
+
+      initContainers:
+        - name: wait-postgres
+          image: {{ .Values.peerTable.image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              until nc -z {{ $rel }}-postgres 5432 2>/dev/null; do
+                echo "waiting for {{ $rel }}-postgres:5432 ..."
+                sleep 3
+              done
+              echo "postgres reachable"
+        # detect-first-block: query EL head and back off ~100 blocks so the
+        # indexer starts with some history. Mirrors mantle-stacks pattern.
+        - name: detect-first-block
+          image: {{ .Values.peerTable.image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -e
+              {{- if .Values.blockscout.firstBlock }}
+              echo "{{ .Values.blockscout.firstBlock }}" > /config/first-block
+              echo "first-block pinned to {{ .Values.blockscout.firstBlock }}"
+              {{- else }}
+              EL_RPC="http://{{ $elHost }}:8545"
+              FB=0
+              for attempt in $(seq 1 60); do
+                HEAD_HEX=$(curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
+                  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+                  "$EL_RPC" 2>/dev/null | jq -r '.result // empty')
+                if [ -n "$HEAD_HEX" ]; then
+                  HEAD=$(printf '%d' "$HEAD_HEX")
+                  FB=$((HEAD - 100))
+                  [ $FB -lt 0 ] && FB=0
+                  echo "EL head=$HEAD, first-block=$FB"
+                  break
+                fi
+                echo "EL not ready ($attempt/60)..."; sleep 5
+              done
+              echo "$FB" > /config/first-block
+              {{- end }}
+          volumeMounts:
+            - { name: config, mountPath: /config }
+
+      containers:
+        - name: blockscout
+          image: {{ .Values.blockscout.image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c]
+          args:
+            - |
+              export FIRST_BLOCK=$(cat /config/first-block)
+              echo "FIRST_BLOCK=$FIRST_BLOCK"
+              bin/blockscout eval "Elixir.Explorer.ReleaseTasks.create_and_migrate()"
+              exec bin/blockscout start
+          env:
+            - { name: DATABASE_URL,             value: "postgresql://postgres:postgres@{{ $rel }}-postgres:5432/blockscout" }
+            - { name: ETHEREUM_JSONRPC_VARIANT, value: geth }
+            - { name: ETHEREUM_JSONRPC_HTTP_URL,  value: "http://{{ $elHost }}:8545" }
+            - { name: ETHEREUM_JSONRPC_WS_URL,    value: "ws://{{ $elHost }}:8546" }
+            - { name: ETHEREUM_JSONRPC_TRACE_URL, value: "http://{{ $elHost }}:8545" }
+            - { name: CHAIN_ID,   value: "{{ .Values.devnet.chainId | int }}" }
+            - { name: COIN,       value: {{ .Values.blockscout.coin | quote }} }
+            - { name: COIN_NAME,  value: {{ .Values.blockscout.coinName | quote }} }
+            - { name: NETWORK,    value: {{ .Values.blockscout.network | quote }} }
+            - { name: SUBNETWORK, value: {{ .Values.blockscout.subnetwork | quote }} }
+            - { name: PORT,       value: "4000" }
+            - { name: POOL_SIZE,  value: "40" }
+            - { name: POOL_SIZE_API, value: "10" }
+            - { name: ECTO_USE_SSL, value: "false" }
+            - { name: DISABLE_EXCHANGE_RATES,    value: "true" }
+            - { name: SHOW_PRICE_CHART,          value: "false" }
+            - { name: DISABLE_KNOWN_TOKENS,      value: "true" }
+            - { name: INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER,  value: "true" }
+            - { name: INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER, value: "true" }
+            - { name: BLOCK_TRANSFORMER, value: base }
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rel }}-blockscout-secret
+                  key: secret-key-base
+            {{- range $k, $v := .Values.blockscout.extraEnv }}
+            - { name: {{ $k }}, value: {{ $v | quote }} }
+            {{- end }}
+          ports:
+            - { name: http, containerPort: 4000 }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+          resources: {{- toYaml .Values.blockscout.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - { name: http, port: 4000, targetPort: 4000, protocol: TCP }
+{{- end }}

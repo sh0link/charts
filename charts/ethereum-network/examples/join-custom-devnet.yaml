@@ -1,0 +1,139 @@
+# Join an existing devnet that was bootstrapped via mode=devnet.
+#
+# Scenario: someone (or you, earlier) ran:
+#     helm install dev1 ./ethereum-network -n eth -f examples/devnet-minimal.yaml
+# That release brought up `dev1-genesis` (the in-cluster genesis service)
+# plus its own validator/rpc nodes. This release attaches additional nodes
+# to that same network — fetching genesis from dev1, sharing the EL/CL chain.
+#
+# Install:
+#   helm install follower1 ./charts/charts/ethereum-network -n eth --create-namespace \
+#     -f charts/charts/ethereum-network/examples/join-custom-devnet.yaml
+
+mode: join
+join:
+  source: custom
+  custom:
+    # URL of the source devnet's in-cluster genesis service. The chart fetches
+    #   /el/genesis.json
+    #   /cl/config.yaml
+    #   /cl/genesis.ssz
+    #   /cl/deposit_contract_block.txt
+    # from this URL.
+    genesisUrl: http://dev1-genesis.eth.svc.cluster.local
+
+    # ─────────────────────────────────────────────────────────────────
+    # Self-discovery via shared mnemonic (recommended).
+    #
+    # When mnemonic is provided, this release computes deterministic enode
+    # and libp2p peer IDs for its own nodes — matching the algorithm dev1
+    # used for its own nodes. This means peer addresses are predictable
+    # cluster-wide without exchanging out-of-band info.
+    #
+    # IMPORTANT: indexStart MUST be set past dev1's allocation. dev1 used
+    # indices [100..103] (2 nodes × 2 keys per node, starting at 100). To
+    # avoid identity collisions, this release starts at 104+.
+    # ─────────────────────────────────────────────────────────────────
+    mnemonic: "test test test test test test test test test test test alone"
+    indexStart: 104   # dev1 consumed 100..103; we start past that
+
+    # Optional bootnodes — useful when self-discovery via mnemonic isn't
+    # possible (e.g. you don't know the source's mnemonic). To get dev1's
+    # enode list:
+    #   kubectl get cm dev1-peer-table -n eth -o jsonpath='{.data.el-static-nodes\.txt}'
+    #   kubectl get cm dev1-peer-table -n eth -o jsonpath='{.data.cl-trusted-peers\.txt}'
+    # then paste below.
+    bootnodes:
+      el: []
+      cl: []
+
+    # Optional: chain ID hint for surrounding tooling (dora, blockscout).
+    # Not consumed by EL/CL — they pick chain ID from the fetched genesis.
+    chainId: 32382
+
+baseDomain: example.org
+
+# Mirror dev1's p2p key wiring so derived identities are interchangeable.
+peerTable:
+  enabled: true
+p2pKey:
+  enabled: true
+  indexStart: 104   # must equal join.custom.indexStart (see above)
+
+nodes:
+  - name: follower-rpc1
+    role: rpc
+    el:
+      client: geth
+      image:
+        repository: ethereum/client-go
+        tag: v1.16.9
+      dataPath: /data/ethereum
+      command:
+        - geth
+        - --datadir=/data/ethereum
+        - --networkid=32382
+        - --syncmode=full
+        - --gcmode=archive
+        - --state.scheme=path
+        - --http
+        - --http.api=eth,net,web3,debug,txpool
+        - --http.addr=0.0.0.0
+        - --http.vhosts=*
+        - --http.corsdomain=*
+        - --ws
+        - --ws.addr=0.0.0.0
+        - --authrpc.port=8551
+        - --authrpc.addr=0.0.0.0
+        - --authrpc.vhosts=*
+        - --authrpc.jwtsecret=/jwt/jwtsecret
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port=6061
+        - --maxpeers=10
+        - --port=30303
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "2",  memory: 4Gi }
+      persistence:
+        size: 20Gi
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+    cl:
+      client: lighthouse
+      image:
+        repository: sigp/lighthouse
+        tag: v8.1.1
+      dataPath: /data/lighthouse
+      command:
+        - lighthouse
+        - beacon_node
+        - --datadir=/data/lighthouse
+        - --testnet-dir=/shared/cl-config
+        - --http
+        - --http-address=0.0.0.0
+        - --http-port=5052
+        - --http-allow-origin=*
+        - --metrics
+        - --metrics-address=0.0.0.0
+        - --metrics-port=5054
+        - --port=9000
+        - --listen-address=0.0.0.0
+        - --execution-endpoint=http://localhost:8551
+        - --execution-jwt=/jwt/jwtsecret
+        - --disable-deposit-contract-sync
+        - --enable-private-discovery
+        - --libp2p-private-key-file=/data/lighthouse/p2p-secret
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "1",  memory: 4Gi }
+      persistence:
+        size: 10Gi
+      ports:
+        - { name: beacon, port: 5052 }
+        - { name: p2p,    port: 9000 }
+        - { name: metric, port: 5054 }

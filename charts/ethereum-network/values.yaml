@@ -1,0 +1,339 @@
+# Default values for ethereum-network.
+# See DESIGN.md for the architectural rationale behind each block.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Top-level mode
+#
+#   devnet  → generate a brand-new network in-cluster via
+#             ethpandaops/ethereum-genesis-generator; an nginx service exposes
+#             the generated genesis so all node pods fetch the same artifacts.
+#
+#   join    → attach this release's nodes to an existing network. See `join`
+#             below for `public` (mainnet/sepolia/holesky/hoodi) vs `custom`
+#             (any devnet's genesis URL).
+# ─────────────────────────────────────────────────────────────────────────────
+mode: devnet
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Parent domain for all ingress hostnames.
+baseDomain: example.org
+
+# When true, hostnames embed a deterministic 8-char suffix derived from
+# sha256(releaseName + svcName), keeping releases collision-free even when
+# multiple users deploy on a shared cluster. Algorithm:
+#   1. sha256(release + svc)         → 64-char hex
+#   2. trunc 8                       → first 8 hex chars
+#   3. repeat 3                      → 24-char string
+#   4. b64enc                        → 32-char base64
+#   5. trunc 8 | lower               → final 8-char lowercase suffix
+domainSuffixEnabled: true
+
+# Default StorageClass for every PVC. Empty = cluster default.
+storageClass: ""
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations: {}
+  tls: []
+
+# Shared mnemonic used for:
+#   - validator signing keys (devnet)
+#   - deterministic P2P node keys (HD index 100+, see p2pKey)
+#
+# Resolution priority (helper "ethereum-network.effectiveMnemonic"):
+#   1. devnet.genesisGenerator.mnemonic   (when mode=devnet)
+#   2. join.custom.mnemonic               (when mode=join, source=custom)
+#   3. .Values.mnemonic                   (fallback)
+mnemonic: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deterministic P2P node keys.
+#
+# Every node derives its EL nodekey and CL p2p secret from the shared mnemonic,
+# using two consecutive BIP-44 indices per node. This lets every node compute
+# every other node's enode and libp2p peer ID without runtime discovery, which
+# is the foundation of the trusted-peer mesh built by the peer-table Job.
+#
+# Index assignment by ordinal in .Values.nodes:
+#   nodes[0].el = indexStart + 0      nodes[0].cl = indexStart + 1
+#   nodes[1].el = indexStart + 2      nodes[1].cl = indexStart + 3
+#   ...
+# ─────────────────────────────────────────────────────────────────────────────
+p2pKey:
+  enabled: true
+  hdPathPrefix: "m/44'/60'/0'/0"
+  indexStart: 100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Peer-table Job.
+#
+# A Helm pre-install/pre-upgrade hook Job derives every node's enode URL and
+# libp2p multiaddr from the mnemonic and writes them to a ConfigMap. Each
+# node's init container then renders the ConfigMap into the EL/CL static-peers
+# files before the main containers start.
+#
+# Auto-disabled for join.public (no shared mnemonic exists for public networks).
+# ─────────────────────────────────────────────────────────────────────────────
+peerTable:
+  enabled: true
+  # Lightweight image used for generic init shells (curl/wget/wait loops).
+  # Must include: curl, wget, /bin/sh, /bin/bash.
+  image: ghcr.io/sh0link/debugger:1.0.0
+  # Image used for python-based key derivation (peer-table Job and the
+  # per-node derive-p2p-key init container). Must include python3 + pip.
+  # Default python:3.11-slim works on k3d via the cluster's registry-proxy.
+  deriveImage: python:3.11-slim
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mode: devnet
+# ─────────────────────────────────────────────────────────────────────────────
+devnet:
+  chainId: 32382
+  preset: minimal                    # minimal | mainnet
+
+  genesisGenerator:
+    image: ethpandaops/ethereum-genesis-generator:6.0.7
+    # Fusaka = EL hard-fork name; Fulu = CL hard-fork name (same upgrade,
+    # different layer aliases). 6.0.x supports both. Older tags (4.x) cap
+    # at deneb/cancun.
+    elFork: fusaka
+    clFork: fulu
+    genesisDelay: 30
+    # ISO 8601 or unix epoch. Empty = now + genesisDelay seconds at job start.
+    genesisTimestamp: ""
+    # The mnemonic seeds validator signing keys AND p2p keys. For real test
+    # networks, override with `openssl rand -hex 16 | xxd ...` derived input.
+    mnemonic: "test test test test test test test test test test test alone"
+
+  # Number of validator signing keys to generate. The first N validators in
+  # `nodes[*].role=validator` consume HD indices [validatorKeys.indexStart,
+  # validatorKeys.indexEnd) from this pool.
+  validatorCount: 64
+
+  genesisService:
+    image: ghcr.io/sh0link/debugger:1.0.0
+    port: 80
+    persistence:
+      size: 1Gi
+      storageClassName: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mode: join
+# ─────────────────────────────────────────────────────────────────────────────
+join:
+  source: public                     # public | custom
+
+  public:
+    network: mainnet                 # mainnet | sepolia | holesky | hoodi
+    # Empty = use chart's built-in default per network.
+    checkpointSyncUrl: ""
+
+  custom:
+    # Root URL of the source devnet's genesis service. Must serve:
+    #   /el/genesis.json
+    #   /cl/config.yaml
+    #   /cl/genesis.ssz
+    #   /cl/deposit_contract_block.txt
+    # Format follows ethereum-genesis-generator's output layout.
+    genesisUrl: ""
+    # If provided, this release derives the same p2p keys as the source devnet
+    # and can populate trusted-peers without manual bootnode entries.
+    mnemonic: ""
+    indexStart: 100
+    bootnodes:
+      el: []
+      cl: []
+    checkpointSyncUrl: ""
+    chainId: 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node topology.
+#
+# Each entry produces one StatefulSet + one headless Service. EL and CL run
+# as sidecars in the same pod and share JWT via emptyDir. Per-node `replicas`
+# is supported but unusual — typically one pod per logical node.
+# ─────────────────────────────────────────────────────────────────────────────
+nodes:
+  - name: validator1
+    role: validator                  # validator | rpc
+    replicas: 1
+
+    # Explicit overrides for the auto-computed p2p HD indices. Useful when
+    # joining an existing devnet whose ordinal assignments differ.
+    p2pKey:
+      elIndexOverride: ~
+      clIndexOverride: ~
+
+    el:
+      client: geth                   # geth | reth | erigon | nethermind | besu
+      image:
+        repository: ethereum/client-go
+        tag: v1.17.3
+        pullPolicy: IfNotPresent
+      dataPath: /data/ethereum
+      commandShell: false
+      command:
+        - geth
+        - --networkid=32382
+        - --datadir=/data/ethereum
+        - --http
+        - --http.api=eth,net,web3,debug,txpool,admin
+        - --http.addr=0.0.0.0
+        - --authrpc.port=8551
+        - --authrpc.addr=0.0.0.0
+        - --authrpc.jwtsecret=/jwt/jwtsecret
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port=6061
+        - --nodekey=/data/ethereum/nodekey
+      resources:
+        requests: { cpu: 500m, memory: 2Gi }
+        limits:   { cpu: "2",  memory: 4Gi }
+      persistence:
+        size: 100Gi
+        storageClassName: ""
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+
+    cl:
+      client: lighthouse              # lighthouse | prysm | teku | nimbus
+      image:
+        repository: sigp/lighthouse
+        tag: v8.1.3
+        pullPolicy: IfNotPresent
+      dataPath: /data/lighthouse
+      commandShell: false
+      command:
+        - lighthouse
+        - beacon_node
+        - --datadir=/data/lighthouse
+        - --testnet-dir=/shared/cl-config
+        - --http
+        - --http-address=0.0.0.0
+        - --http-port=5052
+        - --metrics
+        - --metrics-address=0.0.0.0
+        - --metrics-port=5054
+        - --execution-endpoint=http://localhost:8551
+        - --execution-jwt=/jwt/jwtsecret
+        - --libp2p-private-key-file=/cl-data/p2p-secret
+      resources:
+        requests: { cpu: 500m, memory: 2Gi }
+        limits:   { cpu: "1",  memory: 4Gi }
+      persistence:
+        size: 50Gi
+        storageClassName: ""
+      ports:
+        - { name: beacon,  port: 5052 }
+        - { name: p2p,     port: 9000 }
+        - { name: metric,  port: 5054 }
+
+    # Validator-only: HD-index slice for signing keys.
+    validatorKeys:
+      indexStart: 0
+      indexEnd: 64
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Peripheral services. All disabled by default — opt in per release.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Dora: read-only beacon-chain explorer (sqlite-backed, no postgres).
+# Auto-discovers every node in .Values.nodes and surfaces both beacon &
+# execution endpoints in its UI.
+dora:
+  enabled: false
+  image:
+    repository: pk910/dora-the-explorer
+    tag: v1.20.2
+    pullPolicy: IfNotPresent
+  siteName: "Ethereum Devnet"
+  persistence:
+    size: 5Gi
+    storageClassName: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# Spamoor: ethpandaops continuous-transaction daemon. Spins up scenarios
+# (eoatx / erc20tx / blob / ...) and submits txs to the leader EL.
+spamoor:
+  enabled: false
+  image:
+    repository: ethpandaops/spamoor
+    tag: v1.1.16
+    pullPolicy: IfNotPresent
+  # When unset, spamoor uses the devnet's first premine wallet derived from
+  # the shared mnemonic (HD index 0). Override only for join.custom / production.
+  sponsorPrivateKey: ""
+  # YAML list of scenarios — each becomes a startup-spammer. See spamoor docs
+  # https://github.com/ethpandaops/spamoor for the full config schema.
+  scenarios:
+    - scenario: eoatx
+      name: "Basic ETH Transfers"
+      config:
+        seed: eoatx-spam
+        throughput: 2
+        max_pending: 50
+        max_wallets: 10
+        amount: 1000
+        random_amount: true
+        random_target: true
+  persistence:
+    size: 1Gi
+    storageClassName: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+# Blockscout: full-stack EVM explorer (frontend + indexer). Needs a
+# postgres backend (auto-deployed when this flag is on). Points at the
+# node identified by blockscout.elNodeName, defaulting to the CL leader.
+# Mirrors the mantle-stacks chart's blockscout layout.
+blockscout:
+  enabled: false
+  # Pin to v5.4.0 — the last monolithic image that ships the frontend
+  # assets (/css/*, /js/*) bundled with the backend. v6.x onwards split
+  # the frontend into a separate `blockscout/frontend` deployment which
+  # this chart does not yet wire up.
+  image: blockscout/blockscout:5.4.0
+  elNodeName: ""                     # default: cl leader
+  coin: ETH
+  coinName: Ethereum
+  network: "Ethereum Devnet"
+  subnetwork: "Devnet"
+  # FIRST_BLOCK auto-detected at startup from the EL head (latest - 100).
+  # Override by setting blockscout.firstBlock to a specific number.
+  firstBlock: ""
+  extraEnv: {}
+  persistence:
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 4Gi }
+
+# Postgres: auto-deployed when blockscout.enabled.
+postgres:
+  enabled: false
+  image: postgres:16
+  persistence:
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Monitoring. VMServiceScrape resources are emitted only when:
+#   .Values.vmServiceScrape.enabled = true
+#   AND .Capabilities.APIVersions has operator.victoriametrics.com/v1beta1
+# ─────────────────────────────────────────────────────────────────────────────
+vmServiceScrape:
+  enabled: true

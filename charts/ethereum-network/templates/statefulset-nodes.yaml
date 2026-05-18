@@ -1,0 +1,5 @@
+{{- $ctx := . -}}
+{{- range $i, $node := .Values.nodes }}
+---
+{{ include "ethereum-network.nodeStatefulSet" (dict "node" $node "ordinal" $i "ctx" $ctx) }}
+{{- end }}

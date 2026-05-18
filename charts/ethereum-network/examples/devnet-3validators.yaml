@@ -1,0 +1,141 @@
+# 3-validator devnet, all geth+lighthouse, Fusaka/Fulu fork.
+#
+# Install:
+#   helm install ethereum-devnet-1 ./charts/charts/ethereum-network -n infra --create-namespace \
+#     -f charts/charts/ethereum-network/examples/devnet-3validators.yaml
+
+mode: devnet
+
+baseDomain: local.sh0.link
+domainSuffixEnabled: false
+
+devnet:
+  chainId: 32382
+  preset: minimal
+  validatorCount: 192            # 3 validators × 64 keys each
+  genesisGenerator:
+    # 6.0.7 is the first generator release that knows the Fusaka/Fulu pair.
+    image: ethpandaops/ethereum-genesis-generator:6.0.7
+    elFork: fusaka
+    clFork: fulu
+    genesisDelay: 30
+    mnemonic: "test test test test test test test test test test test alone"
+  genesisService:
+    image: ghcr.io/sh0link/debugger:1.0.0
+    port: 80
+    persistence:
+      size: 1Gi
+
+peerTable:
+  enabled: true
+p2pKey:
+  enabled: true
+  indexStart: 100
+
+# --- shared anchors so all 3 validators are identical except keystore slice ---
+_geth_command: &geth_command
+  - geth
+  - --config=/peers/geth-config.toml
+  - --datadir=/data/ethereum
+  - --networkid=32382
+  - --syncmode=full
+  - --gcmode=archive
+  - --state.scheme=path
+  - --http
+  - --http.api=eth,net,web3,debug,txpool,admin
+  - --http.addr=0.0.0.0
+  - --http.vhosts=*
+  - --http.corsdomain=*
+  - --ws
+  - --ws.addr=0.0.0.0
+  - --authrpc.port=8551
+  - --authrpc.addr=0.0.0.0
+  - --authrpc.vhosts=*
+  - --authrpc.jwtsecret=/jwt/jwtsecret
+  - --metrics
+  - --metrics.addr=0.0.0.0
+  - --metrics.port=6061
+  - --discovery.dns=
+  - --maxpeers=10
+  - --port=30303
+
+_geth_node: &geth_node
+  client: geth
+  image:
+    repository: ethereum/client-go
+    tag: v1.17.3                  # latest stable (Fusaka-ready)
+  dataPath: /data/ethereum
+  command: *geth_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 4Gi }
+  persistence:
+    size: 20Gi
+  ports:
+    - { name: rpc,     port: 8545 }
+    - { name: ws,      port: 8546 }
+    - { name: authrpc, port: 8551 }
+    - { name: p2p,     port: 30303 }
+    - { name: metric,  port: 6061 }
+
+_lh_command: &lh_command
+  - |
+    BOOT_NODES=""
+    if [ -s /shared/cl-bootnodes.txt ]; then
+      BOOT_NODES="--boot-nodes=$(cat /shared/cl-bootnodes.txt)"
+    fi
+    exec lighthouse beacon_node \
+      --datadir=/data/lighthouse \
+      --testnet-dir=/shared/metadata \
+      --http --http-address=0.0.0.0 --http-port=5052 --http-allow-origin='*' \
+      --metrics --metrics-address=0.0.0.0 --metrics-port=5054 \
+      --port=9000 --listen-address=0.0.0.0 \
+      --execution-endpoint=http://localhost:8551 \
+      --execution-jwt=/jwt/jwtsecret \
+      --enable-private-discovery \
+      --enr-address="$POD_IP" \
+      --enr-tcp-port=9000 \
+      --enr-udp-port=9000 \
+      --enr-quic-port=9001 \
+      --allow-insecure-genesis-sync \
+      --subscribe-all-subnets \
+      $BOOT_NODES \
+      --suggested-fee-recipient=0x0000000000000000000000000000000000000000
+
+_lh_node: &lh_node
+  client: lighthouse
+  image:
+    repository: sigp/lighthouse
+    # Fulu support landed in v8.0.0; pin to v8.1.3 (latest with Fulu patches).
+    tag: v8.1.3
+  dataPath: /data/lighthouse
+  commandShell: true
+  command: *lh_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "1",  memory: 4Gi }
+  persistence:
+    size: 10Gi
+  ports:
+    - { name: beacon, port: 5052 }
+    - { name: p2p,    port: 9000 }
+    - { name: metric, port: 5054 }
+
+nodes:
+  - name: validator1
+    role: validator
+    el: *geth_node
+    cl: *lh_node
+    validatorKeys: { indexStart: 0,   indexEnd: 64 }
+
+  - name: validator2
+    role: validator
+    el: *geth_node
+    cl: *lh_node
+    validatorKeys: { indexStart: 64,  indexEnd: 128 }
+
+  - name: validator3
+    role: validator
+    el: *geth_node
+    cl: *lh_node
+    validatorKeys: { indexStart: 128, indexEnd: 192 }

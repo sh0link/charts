@@ -1,0 +1,298 @@
+{{/*
+The derive script is consumed by:
+  - per-node derive-p2p-key init container (gated by p2pKey.enabled + mnemonic)
+  - peer-table Job (gated by peerTable.enabled + mnemonic)
+
+Rendered whenever either path needs it.
+*/}}
+{{- $needScript := false -}}
+{{- if and .Values.p2pKey.enabled (include "ethereum-network.effectiveMnemonic" .) -}}
+{{- $needScript = true -}}
+{{- end -}}
+{{- if include "ethereum-network.peerTableEnabled" . -}}
+{{- $needScript = true -}}
+{{- end -}}
+{{- if $needScript -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ethereum-network.fullname" . }}-derive-script
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+data:
+  derive.py: |
+    #!/usr/bin/env python3
+    """
+    derive.py — Deterministic P2P identity derivation for ethereum-network.
+
+    Two modes:
+      keys   Write the EL nodekey (32-byte raw hex) and CL libp2p private key
+             (32-byte raw hex, lighthouse-compatible) for a single node.
+
+      peers  Read the full nodes list and emit:
+               el-static-nodes.txt  one enode://... per line
+               cl-trusted-peers.txt one /dns4/.../p2p/{peer-id} per line
+
+    Inputs (env):
+      MNEMONIC         shared seed phrase
+      INDEX_START      first HD index used for p2p keys (e.g. 100)
+      RELEASE          helm release name
+      NAMESPACE        kubernetes namespace
+      EL_INDEX         (keys mode) HD index for this node's EL key
+      CL_INDEX         (keys mode) HD index for this node's CL key
+      EL_OUT           (keys mode) path to write EL nodekey
+      CL_OUT           (keys mode) path to write CL p2p-secret
+      NODES_JSON       (peers mode) JSON array, items have {name, el:{ports:[{name,port}]}, cl:{ports:[{name,port}]}}
+      OUT_DIR          (peers mode) directory to write peer-table files
+
+    Dependencies: eth-account, eth-keys, coincurve, base58, protobuf-encoding manual.
+    """
+    import os, sys, json, argparse, hashlib, base64
+    from eth_account import Account
+    from eth_keys import keys
+
+    Account.enable_unaudited_hdwallet_features()
+
+    HD_PATH_PREFIX = "m/44'/60'/0'/0"
+    CL_P2P_PORT_DEFAULT = 9000
+    EL_P2P_PORT_DEFAULT = 30303
+
+
+    def derive_priv(mnemonic: str, index: int) -> bytes:
+        """Derive a 32-byte private key at m/44'/60'/0'/0/<index>."""
+        acct = Account.from_mnemonic(
+            mnemonic, account_path=f"{HD_PATH_PREFIX}/{index}"
+        )
+        return bytes.fromhex(acct.key.hex().removeprefix("0x"))
+
+
+    def el_pubkey_uncompressed(priv: bytes) -> bytes:
+        """64-byte (x||y) uncompressed pubkey — the enode body."""
+        sk = keys.PrivateKey(priv)
+        # eth-keys returns the 64-byte uncompressed form natively.
+        return sk.public_key.to_bytes()
+
+
+    def cl_pubkey_compressed(priv: bytes) -> bytes:
+        """33-byte compressed secp256k1 pubkey — libp2p input."""
+        sk = keys.PrivateKey(priv)
+        uncompressed = sk.public_key.to_bytes()  # 64 bytes: x || y
+        x = uncompressed[:32]
+        y = uncompressed[32:]
+        prefix = b"\x02" if (y[-1] & 1) == 0 else b"\x03"
+        return prefix + x
+
+
+    def varint(n: int) -> bytes:
+        """Protobuf varint encoding."""
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+
+    def protobuf_pubkey(compressed: bytes) -> bytes:
+        """
+        libp2p PublicKey protobuf:
+          message PublicKey { required KeyType Type = 1; required bytes Data = 2; }
+          KeyType: RSA=0, Ed25519=1, Secp256k1=2, ECDSA=3
+        Wire types: varint=0, length-delimited=2.
+        """
+        key_type = 2  # Secp256k1
+        # field 1 (varint): tag = (1 << 3) | 0 = 0x08
+        # field 2 (bytes):  tag = (2 << 3) | 2 = 0x12
+        body = bytes([0x08]) + varint(key_type) + bytes([0x12]) + varint(len(compressed)) + compressed
+        return body
+
+
+    def libp2p_peer_id(compressed_pubkey: bytes) -> str:
+        """
+        libp2p Peer ID = base58( multihash( protobuf(pubkey) ) )
+
+        Per the libp2p PeerID spec
+        (https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md):
+          - keys serialising to <= 42 bytes use the identity multihash
+            (code 0x00, no actual hashing; raw bytes embedded)
+          - keys serialising to > 42 bytes use SHA-256 multihash (code 0x12)
+
+        For secp256k1 the protobuf-wrapped pubkey is 37 bytes, so all
+        Ethereum CL p2p keys go through the identity branch and produce
+        peer IDs starting with "16Uiu...". The sha256 branch is kept so
+        the helper stays correct for hypothetical RSA keys.
+        """
+        pb = protobuf_pubkey(compressed_pubkey)
+        if len(pb) <= 42:
+            # identity multihash: 0x00 <varint length> <pb bytes>
+            multihash = bytes([0x00]) + varint(len(pb)) + pb
+        else:
+            digest = hashlib.sha256(pb).digest()
+            multihash = bytes([0x12, 0x20]) + digest
+        try:
+            import base58
+            return base58.b58encode(multihash).decode()
+        except ImportError:
+            return _b58encode(multihash)
+
+
+    _B58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+    def _b58encode(data: bytes) -> str:
+        n = int.from_bytes(data, "big")
+        encoded = bytearray()
+        while n > 0:
+            n, r = divmod(n, 58)
+            encoded.append(_B58_ALPHABET[r])
+        # preserve leading zero bytes as '1'
+        for b in data:
+            if b == 0:
+                encoded.append(_B58_ALPHABET[0])
+            else:
+                break
+        encoded.reverse()
+        return encoded.decode()
+
+
+    def protobuf_privkey(raw: bytes) -> bytes:
+        """
+        libp2p PrivateKey protobuf — identical wire shape to PublicKey:
+          message PrivateKey { required KeyType Type = 1; required bytes Data = 2; }
+        Used on disk by Teku (which stores it hex-encoded with 0x prefix).
+        """
+        key_type = 2  # Secp256k1
+        return bytes([0x08]) + varint(key_type) + bytes([0x12]) + varint(len(raw)) + raw
+
+
+    def find_port(ports, name, default):
+        for p in ports or []:
+            if p.get("name") == name:
+                return int(p["port"])
+        return default
+
+
+    # Per-CL on-disk format. Verified against real client behaviour in P3.
+    #
+    #   client       file path (relative to datadir)      content
+    #   ----------   ----------------------------------   ----------------------------
+    #   lighthouse   <datadir>/beacon/network/key         32 raw binary bytes
+    #   prysm        <datadir>/network-keys               32-byte hex string
+    #   teku         <datadir>/p2p-key                    "0x" + protobuf-hex string
+    #   nimbus       <datadir>/<netKeyFile>               EIP-2335 keystore (UNSUPPORTED)
+    #
+    # Returns (bytes, is_binary). The caller writes the file accordingly.
+    def cl_serialize(priv: bytes, fmt: str):
+        if fmt == "lighthouse":
+            return priv, True            # raw 32-byte binary
+        if fmt in ("prysm", ""):
+            return priv.hex().encode(), False
+        if fmt == "teku":
+            return ("0x" + protobuf_privkey(priv).hex()).encode(), False
+        if fmt == "nimbus":
+            raise SystemExit(
+                "Nimbus uses an EIP-2335 encrypted keystore. Automatic "
+                "derivation is not implemented in MVP. Use lighthouse / "
+                "prysm / teku, or generate the keystore manually."
+            )
+        raise SystemExit(f"Unknown CL_FORMAT: {fmt!r}")
+
+
+    def cmd_keys():
+        mnemonic = os.environ["MNEMONIC"]
+        el_index = int(os.environ["EL_INDEX"])
+        cl_index = int(os.environ["CL_INDEX"])
+        el_out = os.environ["EL_OUT"]
+        cl_out = os.environ["CL_OUT"]
+        cl_format = os.environ.get("CL_FORMAT", "lighthouse")
+        for path, idx, kind in [(el_out, el_index, "el"), (cl_out, cl_index, "cl")]:
+            if os.path.exists(path):
+                print(f"{path} already exists, leaving untouched")
+                continue
+            priv = derive_priv(mnemonic, idx)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # EL nodekey is always raw hex (geth/reth/erigon all accept it).
+            # CL format is client-specific; some clients want binary.
+            if kind == "el":
+                body, binary = priv.hex().encode(), False
+            else:
+                body, binary = cl_serialize(priv, cl_format)
+            mode = "wb" if binary else "w"
+            payload = body if binary else body.decode()
+            with open(path, mode) as f:
+                f.write(payload)
+            print(f"{path} written (index {idx}, kind={kind}, fmt={cl_format if kind=='cl' else 'el-hex'}, binary={binary})")
+
+
+    def cmd_peers():
+        mnemonic = os.environ["MNEMONIC"]
+        index_start = int(os.environ["INDEX_START"])
+        release = os.environ["RELEASE"]
+        namespace = os.environ["NAMESPACE"]
+        out_dir = os.environ["OUT_DIR"]
+        nodes = json.loads(os.environ["NODES_JSON"])
+
+        el_lines = []
+        cl_lines = []
+        for i, node in enumerate(nodes):
+            name = node["name"]
+            el_idx = index_start + i * 2
+            cl_idx = index_start + i * 2 + 1
+
+            # EL
+            el_priv = derive_priv(mnemonic, el_idx)
+            el_pub_hex = el_pubkey_uncompressed(el_priv).hex()
+            el_port = find_port((node.get("el") or {}).get("ports"), "p2p", EL_P2P_PORT_DEFAULT)
+            dns = f"{release}-{name}-0.{release}-{name}.{namespace}.svc.cluster.local"
+            el_lines.append(
+                f"enode://{el_pub_hex}@{dns}:{el_port}"
+            )
+
+            # CL
+            cl_priv = derive_priv(mnemonic, cl_idx)
+            cl_pub = cl_pubkey_compressed(cl_priv)
+            peer_id = libp2p_peer_id(cl_pub)
+            cl_port = find_port((node.get("cl") or {}).get("ports"), "p2p", CL_P2P_PORT_DEFAULT)
+            # lighthouse's --boot-nodes requires a UDP segment in the
+            # multiaddr (discv5 is over UDP). It listens for quic-v1 on
+            # cl_port+1 by default. We emit BOTH the TCP-only form (for
+            # generic libp2p direct dialers) and the UDP/quic-v1 form
+            # (for lighthouse boot-nodes). The Job writes BOTH files so
+            # callers can pick whichever fits.
+            cl_lines.append(
+                f"/dns4/{dns}/tcp/{cl_port}/p2p/{peer_id}"
+            )
+
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "el-static-nodes.txt"), "w") as f:
+            f.write("\n".join(el_lines) + "\n")
+        with open(os.path.join(out_dir, "cl-trusted-peers.txt"), "w") as f:
+            f.write("\n".join(cl_lines) + "\n")
+
+        # Also emit a geth-compatible static-nodes.json (a JSON array of enodes)
+        with open(os.path.join(out_dir, "el-static-nodes.json"), "w") as f:
+            json.dump(el_lines, f, indent=2)
+
+        print(f"Wrote {len(el_lines)} EL enodes, {len(cl_lines)} CL multiaddrs to {out_dir}")
+        for ln in el_lines:
+            print("  EL:", ln)
+        for ln in cl_lines:
+            print("  CL:", ln)
+
+
+    def main():
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--mode", choices=["keys", "peers"], required=True)
+        args = ap.parse_args()
+        if args.mode == "keys":
+            cmd_keys()
+        else:
+            cmd_peers()
+
+
+    if __name__ == "__main__":
+        main()
+{{- end }}

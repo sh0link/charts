@@ -1,0 +1,169 @@
+# Join the public Sepolia testnet with two heterogeneous RPC nodes.
+#
+# Install:
+#   helm install sepolia ./charts/charts/ethereum-network -n eth --create-namespace \
+#     -f charts/charts/ethereum-network/examples/join-public-sepolia.yaml
+
+mode: join
+join:
+  source: public
+  public:
+    network: sepolia
+    # Leave checkpointSyncUrl empty to use the chart's built-in default
+    # (https://sepolia.beaconstate.info).
+
+baseDomain: example.org
+
+# Public networks join via the DHT — no shared mnemonic exists, so the
+# peer-table mechanism is moot. The helper auto-disables it for join.public,
+# but be explicit here too.
+peerTable:
+  enabled: false
+p2pKey:
+  enabled: false
+
+nodes:
+  # ── rpc1: geth + lighthouse ────────────────────────────────────────
+  - name: rpc1
+    role: rpc
+    el:
+      client: geth
+      image:
+        repository: ethereum/client-go
+        tag: v1.16.9
+      dataPath: /data/ethereum
+      command:
+        - geth
+        - --sepolia
+        - --datadir=/data/ethereum
+        - --state.scheme=path
+        - --verbosity=3
+        - --http
+        - --http.api=eth,net,web3,debug,txpool
+        - --http.addr=0.0.0.0
+        - --http.vhosts=*
+        - --http.corsdomain=*
+        - --ws
+        - --ws.addr=0.0.0.0
+        - --authrpc.port=8551
+        - --authrpc.addr=0.0.0.0
+        - --authrpc.vhosts=*
+        - --authrpc.jwtsecret=/jwt/jwtsecret
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port=6061
+        - --maxpeers=50
+      resources:
+        requests: { cpu: "1", memory: 4Gi }
+        limits:   { cpu: "4", memory: 8Gi }
+      persistence:
+        size: 200Gi
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+    cl:
+      client: lighthouse
+      image:
+        repository: sigp/lighthouse
+        tag: v8.1.1
+      dataPath: /data/lighthouse
+      command:
+        - lighthouse
+        - beacon_node
+        - --datadir=/data/lighthouse
+        - --network=sepolia
+        - --checkpoint-sync-url=https://sepolia.beaconstate.info
+        - --disable-deposit-contract-sync
+        - --http
+        - --http-address=0.0.0.0
+        - --http-port=5052
+        - --metrics
+        - --metrics-address=0.0.0.0
+        - --metrics-port=5054
+        - --port=9000
+        - --listen-address=0.0.0.0
+        - --execution-endpoint=http://localhost:8551
+        - --execution-jwt=/jwt/jwtsecret
+      resources:
+        requests: { cpu: "1", memory: 4Gi }
+        limits:   { cpu: "2", memory: 8Gi }
+      persistence:
+        size: 100Gi
+      ports:
+        - { name: beacon,  port: 5052 }
+        - { name: p2p,     port: 9000 }
+        - { name: metric,  port: 5054 }
+
+  # ── rpc2: reth + prysm (different client combo for redundancy) ─────
+  - name: rpc2
+    role: rpc
+    el:
+      client: reth
+      image:
+        repository: ghcr.io/paradigmxyz/reth
+        tag: v1.11.3
+      dataPath: /data/ethereum
+      commandShell: true
+      command:
+        - |
+          reth node \
+            --chain=sepolia \
+            --datadir=/data/ethereum \
+            -vvv \
+            --http \
+            --http.api=eth,net,web3,debug,txpool \
+            --http.corsdomain="*" \
+            --http.addr=0.0.0.0 \
+            --http.port=8545 \
+            --ws --ws.api=eth,web3,net --ws.addr=0.0.0.0 \
+            --authrpc.port=8551 --authrpc.addr=0.0.0.0 \
+            --authrpc.jwtsecret=/jwt/jwtsecret \
+            --metrics=0.0.0.0:6061 \
+            --port=30303 \
+            --max-outbound-peers=50 --max-inbound-peers=50
+      resources:
+        requests: { cpu: "1", memory: 4Gi }
+        limits:   { cpu: "4", memory: 8Gi }
+      persistence:
+        size: 200Gi
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+    cl:
+      client: prysm
+      image:
+        repository: gcr.io/prysmaticlabs/prysm/beacon-chain
+        tag: v5.1.2
+      dataPath: /data/prysm
+      command:
+        - --datadir=/data/prysm
+        - --sepolia
+        - --checkpoint-sync-url=https://sepolia.beaconstate.info
+        - --genesis-beacon-api-url=https://sepolia.beaconstate.info
+        - --rpc-host=0.0.0.0
+        - --grpc-gateway-host=0.0.0.0
+        - --grpc-gateway-port=5052
+        - --http-modules=eth,net,web3
+        - --monitoring-host=0.0.0.0
+        - --monitoring-port=5054
+        - --p2p-tcp-port=9000
+        - --p2p-udp-port=9000
+        - --p2p-host-ip=0.0.0.0
+        - --execution-endpoint=http://localhost:8551
+        - --jwt-secret=/jwt/jwtsecret
+        - --accept-terms-of-use
+      resources:
+        requests: { cpu: "1", memory: 4Gi }
+        limits:   { cpu: "2", memory: 8Gi }
+      persistence:
+        size: 100Gi
+      ports:
+        - { name: beacon,  port: 5052 }
+        - { name: p2p,     port: 9000 }
+        - { name: metric,  port: 5054 }

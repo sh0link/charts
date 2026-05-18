@@ -1,0 +1,41 @@
+{{- if .Values.dora.enabled -}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $rel }}-dora-config
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+data:
+  config.yml: |
+    server:
+      host: "0.0.0.0"
+      port: "8080"
+    api:
+      enabled: true
+      requireAuth: false
+    frontend:
+      enabled: true
+      siteName: {{ .Values.dora.siteName | quote }}
+      siteSubtitle: "chain {{ .Values.devnet.chainId }}"
+    beaconapi:
+      endpoints:
+        {{- range $i, $node := .Values.nodes }}
+        - name: {{ printf "%s-%s" $rel $node.name | quote }}
+          url: {{ printf "http://%s-%s:5052" $rel $node.name | quote }}
+          priority: {{ add $i 1 }}
+          archive: true
+        {{- end }}
+      localCacheSize: 100
+    executionapi:
+      endpoints:
+        {{- range $i, $node := .Values.nodes }}
+        - name: {{ printf "%s-%s" $rel $node.name | quote }}
+          url: {{ printf "http://%s-%s:8545" $rel $node.name | quote }}
+          priority: {{ add $i 1 }}
+        {{- end }}
+    database:
+      engine: "sqlite"
+      sqlite:
+        file: "/data/explorer-db.sqlite"
+{{- end }}
