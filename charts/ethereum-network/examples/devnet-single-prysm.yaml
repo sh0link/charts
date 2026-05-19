@@ -1,0 +1,174 @@
+# Single-validator Glamsterdam devnet: 1 geth + 1 prysm.
+#
+# Image set follows glamsterdam-devnet-3 inventory:
+#   https://github.com/ethpandaops/glamsterdam-devnets/blob/master/ansible/inventories/devnet-3/group_vars/all/images.yaml
+#   geth:           ethpandaops/geth:bal-devnet-6
+#   prysm-beacon:   ethpandaops/prysm-beacon-chain:glamsterdam-devnet-3
+#   prysm-validator:ethpandaops/prysm-validator:glamsterdam-devnet-3
+#
+# Smallest viable devnet — one node owns all 64 validators in genesis.ssz
+# and produces every block. Useful as a smoke test for EL/CL client builds
+# without paying for a 3+ pod set.
+#
+# Install:
+#   helm install ethereum-devnet-1 ./charts/charts/ethereum-network \
+#     -f charts/charts/ethereum-network/examples/devnet-single-prysm.yaml \
+#     -n infra --create-namespace
+
+mode: devnet
+baseDomain: local.sh0.link
+domainSuffixEnabled: true
+
+# ── peripherals (mirror glamsterdam-devnet-3 inventory) ──────────────
+dora:
+  enabled: true
+  image:
+    repository: ethpandaops/dora
+    tag: master-latest
+spamoor:
+  enabled: true
+  image:
+    repository: ethpandaops/spamoor
+    tag: master-latest
+blockscout:
+  enabled: true
+  # Chart only supports the monolithic v5 image; inventory's `latest`
+  # already moved to v8+ which requires a separate frontend deployment.
+  image: blockscout/blockscout:5.4.0
+
+devnet:
+  chainId: 32386
+  # ethpandaops glamsterdam-devnet-3 builds use mainnet preset spec
+  # constants — minimal preset is rejected at startup.
+  preset: mainnet
+  # 64 = the smallest validator set ethpandaops/genesis-generator will
+  # produce; one prysm vc signs all 64 keys.
+  validatorCount: 64
+  genesisGenerator:
+    image: ethpandaops/ethereum-genesis-generator:6.0.5
+    elFork: gloas
+    clFork: gloas
+    genesisDelay: 30
+    mnemonic: "test test test test test test test test test test test alone"
+    extraEnv:
+      # Activate Glamsterdam at genesis; later forks stay at the "never"
+      # sentinel so prysm doesn't trip on unknown post-Glamsterdam fields.
+      GLOAS_FORK_EPOCH: "0"
+  genesisService:
+    image: ghcr.io/sh0link/debugger:1.0.0
+    persistence: { size: 1Gi }
+
+# Single-node devnet still uses HD-derived p2p keys so genesis-info and
+# peer table generation paths exercise the same code as multi-node.
+p2pKey:
+  enabled: true
+  indexStart: 100
+
+# Peer table has a single entry; not strictly needed but harmless and
+# keeps the example consistent with the multi-node ones.
+peerTable:
+  enabled: true
+
+# ── geth (ethpandaops bal-devnet-6 build) ────────────────────────────
+_geth_command: &geth_command
+  - geth
+  - --config=/peers/geth-config.toml
+  - --datadir=/data/ethereum
+  - --networkid=32386
+  - --syncmode=full
+  - --gcmode=archive
+  - --state.scheme=path
+  - --http
+  - --http.api=eth,net,web3,debug,txpool,admin
+  - --http.addr=0.0.0.0
+  - --http.vhosts=*
+  - --http.corsdomain=*
+  - --ws
+  - --ws.addr=0.0.0.0
+  - --authrpc.port=8551
+  - --authrpc.addr=0.0.0.0
+  - --authrpc.vhosts=*
+  - --authrpc.jwtsecret=/jwt/jwtsecret
+  - --metrics
+  - --metrics.addr=0.0.0.0
+  - --metrics.port=6061
+  - --discovery.dns=
+  - --maxpeers=10
+  - --port=30303
+
+_geth_node: &geth_node
+  client: geth
+  image: { repository: ethpandaops/geth, tag: bal-devnet-6 }
+  dataPath: /data/ethereum
+  command: *geth_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 4Gi }
+  persistence: { size: 20Gi }
+  ports:
+    - { name: rpc,     port: 8545 }
+    - { name: ws,      port: 8546 }
+    - { name: authrpc, port: 8551 }
+    - { name: p2p,     port: 30303 }
+    - { name: metric,  port: 6061 }
+
+# ── prysm (ethpandaops glamsterdam-devnet-3 build) ───────────────────
+# This is ethpandaops's fork-aware build, not the upstream prysmaticlabs
+# release. It knows the Gloas fork fields that vanilla prysm rejects.
+# Binary lives at /app/cmd/beacon-chain/beacon-chain inside this image.
+_prysm_command: &prysm_command
+  - |
+    BOOT_FLAG=""
+    if [ -s /shared/cl-bootnodes.txt ]; then
+      BOOT_FLAG="--bootstrap-node=$(cat /shared/cl-bootnodes.txt)"
+    fi
+    BIN=/beacon-chain
+    [ -x /app/cmd/beacon-chain/beacon-chain ] && BIN=/app/cmd/beacon-chain/beacon-chain
+    exec $BIN \
+      --datadir=/data/prysm \
+      --chain-config-file=/shared/metadata/config.yaml \
+      --genesis-state=/shared/metadata/genesis.ssz \
+      --rpc-host=0.0.0.0 \
+      --grpc-gateway-host=0.0.0.0 \
+      --grpc-gateway-port=5052 \
+      --http-modules=eth,net,web3 \
+      --monitoring-host=0.0.0.0 \
+      --monitoring-port=5054 \
+      --p2p-tcp-port=9000 \
+      --p2p-udp-port=9000 \
+      --p2p-host-ip="$POD_IP" \
+      --p2p-priv-key=/data/prysm/network-keys \
+      --min-sync-peers=0 \
+      --execution-endpoint=http://localhost:8551 \
+      --jwt-secret=/jwt/jwtsecret \
+      --accept-terms-of-use \
+      --suggested-fee-recipient=0x0000000000000000000000000000000000000000 \
+      $BOOT_FLAG
+
+_prysm_node: &prysm_node
+  client: prysm
+  image: { repository: ethpandaops/prysm-beacon-chain, tag: glamsterdam-devnet-3 }
+  # vc binary in a separate image (chart picks this up via cl.vcImage).
+  vcImage: { repository: ethpandaops/prysm-validator, tag: glamsterdam-devnet-3 }
+  dataPath: /data/prysm
+  commandShell: true
+  command: *prysm_command
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "1",  memory: 4Gi }
+  persistence: { size: 10Gi }
+  ports:
+    - { name: beacon, port: 5052 }
+    - { name: p2p,    port: 9000 }
+    - { name: metric, port: 5054 }
+
+nodes:
+  - name: validator1
+    role: validator
+    el: *geth_node
+    cl: *prysm_node
+    validatorKeys: { indexStart: 0, indexEnd: 64 }
+
+# Single-release dashboard.
+grafanaDashboard:
+  enabled: true

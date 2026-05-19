@@ -476,7 +476,10 @@ spec:
               SRC="/shared/vc-keystores/node{{ $vcOrdinal }}/prysm"
               WALLET_PW=/vc-data/wallet-password.txt
               echo -n devnet > $WALLET_PW
-              until wget -q -O- http://127.0.0.1:5052/eth/v1/node/version >/dev/null 2>&1; do sleep 2; done
+              # prysm vc retries beacon-rpc-provider internally with backoff,
+              # so a shell-side wait isn't needed. Older revisions of this
+              # template used `until wget …` which silently hangs forever on
+              # distroless validator images (ethpandaops's build has no wget).
               # docker-hub `prysmaticlabs/prysm-validator` image puts the
               # binary at /validator; gcr `prysm/validator` keeps it at
               # /app/cmd/validator/validator. Probe both.
