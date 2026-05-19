@@ -7,7 +7,7 @@
 mode: devnet
 
 baseDomain: local.sh0.link
-domainSuffixEnabled: false
+domainSuffixEnabled: true
 
 devnet:
   chainId: 32382
@@ -139,3 +139,8 @@ nodes:
     el: *geth_node
     cl: *lh_node
     validatorKeys: { indexStart: 128, indexEnd: 192 }
+
+# Ship the chain-overview dashboard from this release (single-release
+# convention — see values.yaml comment).
+grafanaDashboard:
+  enabled: true

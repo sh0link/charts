@@ -11,10 +11,10 @@
 
 mode: devnet
 baseDomain: local.sh0.link
-domainSuffixEnabled: false
+domainSuffixEnabled: true
 
 devnet:
-  chainId: 32382
+  chainId: 32383
   preset: minimal
   validatorCount: 192            # 64 per validator × 3
   genesisGenerator:

@@ -337,3 +337,18 @@ postgres:
 # ─────────────────────────────────────────────────────────────────────────────
 vmServiceScrape:
   enabled: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chart-side Grafana dashboard ConfigMap.
+#
+# When enabled, the chart ships a ConfigMap labelled `grafana_dashboard: "1"`
+# that grafana's sidecar auto-imports. The dashboard has three variables
+# (namespace, chain_id, network) so a single import covers ALL devnets sharing
+# the same vmstack — no per-release duplication.
+#
+# Caveat: the ConfigMap name is fixed (`ethereum-network-chain-overview`),
+# so enabling this on more than one release in the same namespace conflicts.
+# Recommended pattern: enable on exactly one release per cluster.
+# ─────────────────────────────────────────────────────────────────────────────
+grafanaDashboard:
+  enabled: false

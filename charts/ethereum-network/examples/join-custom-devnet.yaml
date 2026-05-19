@@ -49,7 +49,7 @@ join:
 
     # Optional: chain ID hint for surrounding tooling (dora, blockscout).
     # Not consumed by EL/CL — they pick chain ID from the fetched genesis.
-    chainId: 32382
+    chainId: 32385
 
 baseDomain: example.org
 

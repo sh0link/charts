@@ -9,15 +9,32 @@ Build the rule list from the node's exposed ports. We surface only the
 user-facing ports here — metric ports are scraped via VMServiceScrape,
 p2p ports are pod-to-pod via the headless service.
 */}}
+{{/*
+Build rule list. Port-naming policy:
+  - rpc / ws / beacon → keep the raw short name (e.g. `rpc`) for friendly
+    hosts like `…-rpc-<hash>.example.com`. These names are unique
+    EL-vs-CL (only EL has rpc/ws, only CL has beacon), so no collision.
+  - metric → EL and CL both call their port `metric`, which would
+    collide on host AND on the ingress backend lookup (service ports
+    are namespaced as `el-metric`/`cl-metric`). Prefix the rule's port
+    name so the rendered host becomes `…-el-metric-<hash>` /
+    `…-cl-metric-<hash>` and the backend reference resolves cleanly.
+  - p2p → UDP/TCP pod-to-pod, never publicly routed.
+  - authrpc → JWT-protected engine API, never publicly routed.
+*/}}
 {{- $rules := list -}}
 {{- range $node.el.ports -}}
   {{- if or (eq .name "rpc") (eq .name "ws") -}}
-    {{- $rules = append $rules (dict "port" .name "number" .port) -}}
+    {{- $rules = append $rules (dict "port" .name "svcPort" (printf "el-%s" .name) "number" .port) -}}
+  {{- else if hasPrefix "metric" .name -}}
+    {{- $rules = append $rules (dict "port" (printf "el-%s" .name) "svcPort" (printf "el-%s" .name) "number" .port) -}}
   {{- end -}}
 {{- end -}}
 {{- range $node.cl.ports -}}
   {{- if eq .name "beacon" -}}
-    {{- $rules = append $rules (dict "port" .name "number" .port) -}}
+    {{- $rules = append $rules (dict "port" .name "svcPort" (printf "cl-%s" .name) "number" .port) -}}
+  {{- else if hasPrefix "metric" .name -}}
+    {{- $rules = append $rules (dict "port" (printf "cl-%s" .name) "svcPort" (printf "cl-%s" .name) "number" .port) -}}
   {{- end -}}
 {{- end -}}
 {{- if $rules }}
@@ -82,6 +99,42 @@ spec:
                 name: {{ $genesisName }}
                 port:
                   number: 80
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+{{/*
+Separate "www" entry-point pointing at the genesis nginx pod's dedicated
+www server (port 8080, isolated root /usr/share/nginx/www holding only
+index.html). Same Service, different named port → no chance of leaking
+into the autoindexed artefact tree.
+*/}}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-www
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    app: {{ .Release.Name }}-www
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ include "ethereum-network.host" (dict "release" .Release.Name "svc" "www" "port" "http" "ctx" .) }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $genesisName }}
+                port:
+                  name: www
   {{- with .Values.ingress.tls }}
   tls:
     {{- toYaml . | nindent 4 }}

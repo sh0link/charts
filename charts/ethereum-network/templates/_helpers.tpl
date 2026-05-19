@@ -216,6 +216,28 @@ Per-node resource name: {release}-{node.name}
 {{- end }}
 
 {{/*
+Effective chain id, irrespective of mode:
+  devnet      → devnet.chainId
+  join.public → public network's canonical chain id
+  join.custom → join.custom.chainId (user-provided hint)
+*/}}
+{{- define "ethereum-network.chainId" -}}
+{{- if include "ethereum-network.isDevnet" . -}}
+{{- .Values.devnet.chainId -}}
+{{- else if include "ethereum-network.isJoinPublic" . -}}
+{{- $net := .Values.join.public.network -}}
+{{- if eq $net "mainnet" -}}1
+{{- else if eq $net "sepolia" -}}11155111
+{{- else if eq $net "holesky" -}}17000
+{{- else if eq $net "hoodi" -}}560048
+{{- else -}}0
+{{- end -}}
+{{- else if include "ethereum-network.isJoinCustom" . -}}
+{{- .Values.join.custom.chainId | default 0 -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Stable in-cluster DNS name for a node's headless service. Used by the
 peer-table Job to assemble enode / multiaddr URLs that survive pod restarts.
 */}}

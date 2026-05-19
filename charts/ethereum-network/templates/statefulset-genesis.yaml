@@ -19,13 +19,27 @@ spec:
       labels:
         app: {{ $name }}
         ethereum-network.io/role: genesis
+      annotations:
+        # Triggers rollout whenever the nginx config / index.html change.
+        # Without this, ConfigMap edits would not bump the pod template
+        # hash and the cp-on-init dashboard would stay stale.
+        checksum/genesis-nginx: {{ include (print $.Template.BasePath "/configmap-genesis-nginx.yaml") . | sha256sum }}
     spec:
       volumes:
         - name: nginx-config
           configMap:
             name: {{ $rel }}-genesis-nginx
+        # /usr/share/nginx/html — genesis artefact tree (autoindex)
         - name: web
           emptyDir: {}
+        # /usr/share/nginx/www  — landing dashboard root (index.html only).
+        # Sourced from the same ConfigMap but mounted in a separate
+        # directory so the genesis server cannot see it and vice versa.
+        - name: www
+          configMap:
+            name: {{ $rel }}-genesis-nginx
+            items:
+              - { key: index.html, path: index.html }
       initContainers:
         # ── 1. Generate genesis artefacts ────────────────────────────
         - name: generate
@@ -241,6 +255,9 @@ spec:
               fi
               ls -laR /web | head -80
               # Mark ready last — node init's wait-for-genesis polls /ready.
+              # The landing dashboard (index.html) is served from a separate
+              # nginx server using its own ConfigMap-backed root, so no
+              # publish step is needed for it.
               echo "ok" > /web/ready
               echo "Published"
           volumeMounts:
@@ -253,9 +270,14 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 80 }
+            - { name: www,  containerPort: 8080 }
           volumeMounts:
             - { name: web, mountPath: /usr/share/nginx/html }
+            - { name: www, mountPath: /usr/share/nginx/www, readOnly: true }
             - { name: nginx-config, mountPath: /etc/nginx/conf.d/default.conf, subPath: default.conf }
+          # Probe the artefact server (genesis) — only this server gates
+          # the node init's wait-for-genesis loop. The www server has no
+          # generation step, so always-ready is correct for it.
           readinessProbe:
             httpGet: { path: /ready, port: 80 }
             initialDelaySeconds: 2

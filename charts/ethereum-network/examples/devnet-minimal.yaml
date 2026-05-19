@@ -12,7 +12,7 @@ mode: devnet
 baseDomain: example.org
 
 devnet:
-  chainId: 32382
+  chainId: 32381
   preset: minimal
   validatorCount: 64
   genesisGenerator:

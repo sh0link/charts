@@ -16,7 +16,7 @@
 
 mode: devnet
 baseDomain: local.sh0.link
-domainSuffixEnabled: false
+domainSuffixEnabled: true
 
 # ── peripheral images (mirror glamsterdam-devnet-3 inventory) ─────────
 dora:
@@ -38,7 +38,7 @@ blockscout:
   image: blockscout/blockscout:5.4.0
 
 devnet:
-  chainId: 32382
+  chainId: 32384
   # glamsterdam ethpandaops builds are compiled with mainnet preset spec
   # constants only — minimal preset triggers
   # "YAML configuration incompatible with spec constants for minimal" in
@@ -114,42 +114,6 @@ _geth_node: &geth_node
     - { name: p2p,     port: 30303 }
     - { name: metric,  port: 6061 }
 
-# ── shared reth (ethpandaops bal-devnet-6) ───────────────────────────
-_reth_command: &reth_command
-  - |
-    TRUSTED=""
-    if [ -s /peers/el-static-nodes.csv ]; then
-      TRUSTED="--trusted-peers=$(cat /peers/el-static-nodes.csv)"
-    fi
-    exec reth node \
-      --chain=/shared/el-genesis.json \
-      --datadir=/data/ethereum \
-      --port=30303 \
-      --http --http.addr=0.0.0.0 --http.api=eth,net,web3,debug,txpool \
-      --ws --ws.addr=0.0.0.0 --ws.api=eth,net,web3 \
-      --authrpc.port=8551 --authrpc.addr=0.0.0.0 \
-      --authrpc.jwtsecret=/jwt/jwtsecret \
-      --metrics=0.0.0.0:6061 \
-      --p2p-secret-key=/data/ethereum/nodekey \
-      $TRUSTED
-
-_reth_node: &reth_node
-  client: reth
-  image: { repository: ethpandaops/reth, tag: bal-devnet-6 }
-  dataPath: /data/ethereum
-  commandShell: true
-  command: *reth_command
-  resources:
-    requests: { cpu: 500m, memory: 1Gi }
-    limits:   { cpu: "2",  memory: 4Gi }
-  persistence: { size: 20Gi }
-  ports:
-    - { name: rpc,     port: 8545 }
-    - { name: ws,      port: 8546 }
-    - { name: authrpc, port: 8551 }
-    - { name: p2p,     port: 30303 }
-    - { name: metric,  port: 6061 }
-
 # ── shared lighthouse (ethpandaops glamsterdam-devnet-3) ─────────────
 _lh_command: &lh_command
   - |
@@ -198,7 +162,7 @@ nodes:
 
   - name: validator2
     role: validator
-    el: *reth_node
+    el: *geth_node
     cl: *lh_node
     validatorKeys: { indexStart: 64,  indexEnd: 128 }
 
@@ -210,5 +174,5 @@ nodes:
 
   - name: rpc1
     role: rpc
-    el: *reth_node
+    el: *geth_node
     cl: *lh_node
