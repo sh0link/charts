@@ -1,4 +1,99 @@
 {{- if include "ethereum-network.needsGenesis" . -}}
+{{- $ctx := . -}}
+{{- $rel := .Release.Name -}}
+{{/*
+─────────────────────────────────────────────────────────────────────────────
+Build the endpoint catalogue at chart-render time.
+
+We can't compute hostnames in the browser because the hash-suffix scheme
+(domainSuffix = sha256(release+svc) → truncated → b64 → lower) lives in
+helm templates. So we expand the full list here into `groups` (a list of
+sections, each with a list of items) and serialise to JSON for the page
+to render client-side.
+─────────────────────────────────────────────────────────────────────────────
+*/}}
+{{- $scheme := ternary "https" "http" (gt (len (default (list) $ctx.Values.ingress.tls)) 0) -}}
+
+{{/* ── Nodes section ─────────────────────────────────────────────── */}}
+{{/*
+The dashboard reflects whatever the chart actually exposes via ingress
+(ingress.yaml). We mirror its port-naming policy here:
+  - rpc / ws / beacon  → host = `<release>-<node>-<name>-<hash>`
+  - metric             → host = `<release>-<node>-{el|cl}-metric-<hash>`
+                          (prefixed to avoid EL/CL collision; matches
+                           ingress.yaml's rule list)
+Anything not in ingress.yaml stays out of this list — broken links are
+worse than missing ones.
+*/}}
+{{- $nodeItems := list -}}
+{{- $metricItems := list -}}
+{{- $hasValidator := false -}}
+{{- range $node := $ctx.Values.nodes -}}
+  {{- if eq $node.role "validator" -}}{{- $hasValidator = true -}}{{- end -}}
+  {{- range $node.el.ports -}}
+    {{- if or (eq .name "rpc") (eq .name "ws") -}}
+      {{- $h := include "ethereum-network.host" (dict "release" $rel "svc" $node.name "port" .name "ctx" $ctx) -}}
+      {{- $label := printf "%s · EL %s" $node.name .name -}}
+      {{- $nodeItems = append $nodeItems (dict "label" $label "url" (printf "%s://%s" $scheme $h) "kind" .name) -}}
+    {{- else if hasPrefix "metric" .name -}}
+      {{- $h := include "ethereum-network.host" (dict "release" $rel "svc" $node.name "port" (printf "el-%s" .name) "ctx" $ctx) -}}
+      {{- $label := printf "%s · EL metrics" $node.name -}}
+      {{- $metricItems = append $metricItems (dict "label" $label "url" (printf "%s://%s/debug/metrics/prometheus" $scheme $h) "kind" "metric") -}}
+    {{- end -}}
+  {{- end -}}
+  {{- range $node.cl.ports -}}
+    {{- if eq .name "beacon" -}}
+      {{- $h := include "ethereum-network.host" (dict "release" $rel "svc" $node.name "port" .name "ctx" $ctx) -}}
+      {{- $label := printf "%s · CL beacon" $node.name -}}
+      {{- $nodeItems = append $nodeItems (dict "label" $label "url" (printf "%s://%s" $scheme $h) "kind" "beacon") -}}
+    {{- else if hasPrefix "metric" .name -}}
+      {{- $h := include "ethereum-network.host" (dict "release" $rel "svc" $node.name "port" (printf "cl-%s" .name) "ctx" $ctx) -}}
+      {{- $label := printf "%s · CL metrics" $node.name -}}
+      {{- $metricItems = append $metricItems (dict "label" $label "url" (printf "%s://%s/metrics" $scheme $h) "kind" "metric") -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+
+{{/* ── Genesis static service ──────────────────────────────────────
+Only the service's root URL — the nginx autoindex lets users drill
+into el/genesis.json, cl/config.yaml, vc-keystores/, etc. Listing every
+artefact would duplicate the autoindex while creating broken links
+whenever a file is renamed by a future generator version. */}}
+{{- $genesisItems := list -}}
+{{- if include "ethereum-network.needsGenesis" $ctx -}}
+  {{- $genesisH := include "ethereum-network.host" (dict "release" $rel "svc" "genesis" "port" "http" "ctx" $ctx) -}}
+  {{- $genesisItems = append $genesisItems (dict "label" "Genesis static service" "url" (printf "%s://%s/" $scheme $genesisH) "kind" "index") -}}
+{{- end -}}
+
+{{/* ── Peripherals (dora / spamoor / blockscout) ─────────────────── */}}
+{{- $periItems := list -}}
+{{- if $ctx.Values.dora.enabled -}}
+  {{- $h := include "ethereum-network.host" (dict "release" $rel "svc" "dora" "port" "http" "ctx" $ctx) -}}
+  {{- $periItems = append $periItems (dict "label" "Dora explorer" "url" (printf "%s://%s" $scheme $h) "kind" "dora") -}}
+{{- end -}}
+{{- if $ctx.Values.spamoor.enabled -}}
+  {{- $h := include "ethereum-network.host" (dict "release" $rel "svc" "spamoor" "port" "http" "ctx" $ctx) -}}
+  {{- $periItems = append $periItems (dict "label" "Spamoor daemon" "url" (printf "%s://%s" $scheme $h) "kind" "spamoor") -}}
+{{- end -}}
+{{- if $ctx.Values.blockscout.enabled -}}
+  {{- $h := include "ethereum-network.host" (dict "release" $rel "svc" "blockscout" "port" "http" "ctx" $ctx) -}}
+  {{- $periItems = append $periItems (dict "label" "Blockscout" "url" (printf "%s://%s" $scheme $h) "kind" "blockscout") -}}
+{{- end -}}
+
+{{/* Each section is only added if it has items, so the rendered HTML
+     never shows an empty heading. */}}
+{{- $groups := list -}}
+{{- if $nodeItems -}}{{- $groups = append $groups (dict "title" "Nodes" "items" $nodeItems) -}}{{- end -}}
+{{- if $periItems -}}{{- $groups = append $groups (dict "title" "Peripherals" "items" $periItems) -}}{{- end -}}
+{{- if $genesisItems -}}{{- $groups = append $groups (dict "title" "Genesis artefacts" "items" $genesisItems) -}}{{- end -}}
+{{- if $metricItems -}}{{- $groups = append $groups (dict "title" "Metrics" "items" $metricItems) -}}{{- end -}}
+
+{{- $payload := dict
+  "release"   $rel
+  "chainId"   (include "ethereum-network.chainId" $ctx)
+  "baseDomain" $ctx.Values.baseDomain
+  "groups"    $groups
+-}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,21 +102,23 @@ metadata:
     {{- include "ethereum-network.labels" . | nindent 4 }}
 data:
   default.conf: |
+    # ─────────────────────────────────────────────────────────────────
+    # Genesis static service — autoindex tree of generated artefacts.
+    # Layout produced by ethereum-genesis-generator:
+    #   /el/genesis.json
+    #   /cl/config.yaml
+    #   /cl/genesis.ssz
+    #   /cl/deposit_contract_block.txt
+    #   /validators/keys.tar  (bundled by the second init container)
+    #   /metadata/            (jwt, mnemonic-derived bits, etc.)
+    # ─────────────────────────────────────────────────────────────────
     server {
       listen 80;
       server_name _;
-
-      # Serve generated genesis artefacts straight from the web root.
-      # Layout produced by ethereum-genesis-generator:
-      #   /el/genesis.json
-      #   /cl/config.yaml
-      #   /cl/genesis.ssz
-      #   /cl/deposit_contract_block.txt
-      #   /validators/keys.tar           (bundled by the second init container)
-      #   /metadata/                     (jwt, mnemonic-derived bits, etc.)
       root /usr/share/nginx/html;
 
-      # autoindex helps human debugging — devnet only, no PII risk.
+      # autoindex is the entire point of this server — directory listing
+      # for human / wget consumption.
       location / {
         autoindex on;
       }
@@ -33,4 +130,176 @@ data:
         try_files $uri =503;
       }
     }
+
+    # ─────────────────────────────────────────────────────────────────
+    # Landing dashboard — separate server, separate root, no autoindex.
+    # Hosts only index.html (and /ready for ingress backend health).
+    # Isolated from the genesis tree so visitors can't browse artefacts
+    # via this hostname.
+    # ─────────────────────────────────────────────────────────────────
+    server {
+      listen 8080;
+      server_name _;
+      root /usr/share/nginx/www;
+      index index.html;
+
+      # Root → index.html. Any other path falls through to a 404 (no
+      # autoindex, no fallback to the genesis tree).
+      location = / {
+        try_files /index.html =404;
+      }
+      location = /ready {
+        try_files $uri =503;
+      }
+    }
+  index.html: |
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <title>{{ $rel }} — endpoints</title>
+      <style>
+        :root {
+          --bg: #0b0f17;
+          --bg-card: #131a26;
+          --bg-card-hover: #1a2433;
+          --border: #232f43;
+          --text: #e6edf3;
+          --text-dim: #8b97a8;
+          --accent: #7aa2f7;
+          --accent-soft: #3b4661;
+          --ok: #9ece6a;
+        }
+        @media (prefers-color-scheme: light) {
+          :root {
+            --bg: #f5f7fb;
+            --bg-card: #ffffff;
+            --bg-card-hover: #f0f3f9;
+            --border: #d9dfe8;
+            --text: #1a1f2e;
+            --text-dim: #5a6678;
+            --accent: #2d5fd9;
+            --accent-soft: #cfd9f0;
+            --ok: #2f7a2f;
+          }
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+          font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+        .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 24px 64px; }
+        header { display: flex; align-items: baseline; justify-content: space-between;
+          gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+        h1 { font-size: 22px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+        .meta { color: var(--text-dim); font-size: 13px; }
+        .meta b { color: var(--text); font-weight: 500; }
+        h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+          color: var(--text-dim); margin: 32px 0 12px; font-weight: 600; }
+        .grid { display: grid; gap: 10px;
+          grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+        .card { display: flex; align-items: stretch; background: var(--bg-card);
+          border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+          transition: background .12s, border-color .12s, transform .12s; }
+        .card:hover { background: var(--bg-card-hover); border-color: var(--accent-soft); }
+        .card a.open { flex: 1; padding: 14px 16px; color: var(--text);
+          text-decoration: none; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+        .card .label { font-weight: 500; font-size: 14px; }
+        .card .url { color: var(--text-dim); font-size: 12px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card button.copy { border: none; border-left: 1px solid var(--border);
+          background: transparent; color: var(--text-dim); cursor: pointer;
+          padding: 0 14px; font-size: 16px; transition: background .12s, color .12s;
+          display: flex; align-items: center; }
+        .card button.copy:hover { background: var(--accent-soft); color: var(--accent); }
+        .card button.copy.copied { color: var(--ok); }
+        .badge { display: inline-block; padding: 1px 8px; border-radius: 999px;
+          background: var(--accent-soft); color: var(--accent); font-size: 11px;
+          font-weight: 500; margin-left: 8px; vertical-align: 1px; }
+        footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border);
+          color: var(--text-dim); font-size: 12px; text-align: center; }
+        footer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          background: var(--bg-card); padding: 1px 6px; border-radius: 4px; }
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <header>
+          <h1>{{ $rel }}<span class="badge">chain {{ include "ethereum-network.chainId" $ctx }}</span></h1>
+          <div class="meta">base domain <b>{{ $ctx.Values.baseDomain }}</b></div>
+        </header>
+        <div id="root"></div>
+        <footer>
+          Click a card to open · click the
+          <code>&#10697;</code> icon to copy the URL ·
+          served by <code>{{ $rel }}-genesis</code>
+        </footer>
+      </div>
+      <script id="payload" type="application/json">{{ $payload | toJson }}</script>
+      <script>
+        (function () {
+          // Payload is embedded as JSON in a non-executing <script> tag.
+          // We render everything with textContent / DOM APIs — no innerHTML —
+          // so any future label/url additions stay XSS-safe even if they
+          // were ever sourced from untrusted user input.
+          const data = JSON.parse(document.getElementById('payload').textContent);
+          const root = document.getElementById('root');
+          for (const g of data.groups) {
+            const h = document.createElement('h2');
+            h.textContent = g.title;
+            root.appendChild(h);
+            const grid = document.createElement('div');
+            grid.className = 'grid';
+            for (const it of g.items) {
+              const card = document.createElement('div');
+              card.className = 'card';
+
+              const a = document.createElement('a');
+              a.className = 'open';
+              a.href = it.url;
+              a.target = '_blank';
+              a.rel = 'noopener noreferrer';
+              const labelSpan = document.createElement('span');
+              labelSpan.className = 'label';
+              labelSpan.textContent = it.label;
+              const urlSpan = document.createElement('span');
+              urlSpan.className = 'url';
+              urlSpan.textContent = it.url;
+              a.appendChild(labelSpan);
+              a.appendChild(urlSpan);
+
+              const btn = document.createElement('button');
+              btn.className = 'copy';
+              btn.type = 'button';
+              btn.title = 'Copy URL';
+              btn.textContent = '⧉';
+              btn.addEventListener('click', async function (ev) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                try {
+                  await navigator.clipboard.writeText(it.url);
+                } catch (_) {
+                  // clipboard API may be blocked on http origins — fall back.
+                  const ta = document.createElement('textarea');
+                  ta.value = it.url; document.body.appendChild(ta);
+                  ta.select(); document.execCommand('copy'); ta.remove();
+                }
+                btn.classList.add('copied');
+                btn.textContent = '✓';
+                setTimeout(function () {
+                  btn.classList.remove('copied');
+                  btn.textContent = '⧉';
+                }, 1200);
+              });
+
+              card.appendChild(a);
+              card.appendChild(btn);
+              grid.appendChild(card);
+            }
+            root.appendChild(grid);
+          }
+        })();
+      </script>
+    </body>
+    </html>
 {{- end }}

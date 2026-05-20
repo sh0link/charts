@@ -1,65 +1,65 @@
-# Glamsterdam (post-Fusaka, EL = "gloas") devnet using ethpandaops client
-# builds from glamsterdam-devnets/devnet-3 (bal-devnet-6 / glamsterdam-devnet-3).
+# Single-validator Glamsterdam devnet: 1 geth + 1 lighthouse.
 #
-# Image set mirrors:
+# Image set follows glamsterdam-devnet-3 inventory:
 #   https://github.com/ethpandaops/glamsterdam-devnets/blob/master/ansible/inventories/devnet-3/group_vars/all/images.yaml
+#   geth:        ethpandaops/geth:bal-devnet-6
+#   lighthouse:  ethpandaops/lighthouse:glamsterdam-devnet-3
 #
-# 3 validators + 1 RPC, all geth+lighthouse for stability (prysm/teku/etc
-# from the same image set should also work with these custom builds, but
-# this example focuses on a known-good baseline).
+# Same topology as devnet-single-prysm but with the lighthouse CL —
+# useful as a reference when prysm-specific quirks (e.g. forkchoice
+# update behaviour for EL finalized hash) need to be ruled out.
 #
 # Install:
-#   helm install ethereum-devnet-glamsterdam ./charts/charts/ethereum-network \
-#     -f charts/charts/ethereum-network/examples/devnet-glamsterdam.yaml \
-#     -n infra --create-namespace \
-#     --set dora.enabled=true --set spamoor.enabled=true --set blockscout.enabled=true
+#   helm install ethereum-devnet-1 ./charts/charts/ethereum-network \
+#     -f charts/charts/ethereum-network/examples/devnet-single-lighthouse.yaml \
+#     -n infra --create-namespace
 
 mode: devnet
 baseDomain: local.sh0.link
 domainSuffixEnabled: true
 
-# ── peripheral images (mirror glamsterdam-devnet-3 inventory) ─────────
+# ── peripherals (mirror glamsterdam-devnet-3 inventory) ──────────────
 dora:
+  enabled: true
   image:
     repository: ethpandaops/dora
     tag: master-latest
-
 spamoor:
+  enabled: true
   image:
     repository: ethpandaops/spamoor
     tag: master-latest
-
 blockscout:
-  # Inventory pins `blockscout/blockscout:latest`; chart's default tag
-  # 5.4.0 is the last monolithic image (frontend bundled). v6+ split the
-  # frontend out, and `latest` already moved to v8+ which breaks our
-  # single-pod assumption. Pin to 5.4.0 unless you also wire up the
-  # separate blockscout frontend service.
+  enabled: true
+  # Chart only supports the monolithic v5 image.
   image: blockscout/blockscout:5.4.0
 
 devnet:
-  chainId: 32384
-  # glamsterdam ethpandaops builds are compiled with mainnet preset spec
-  # constants only — minimal preset triggers
-  # "YAML configuration incompatible with spec constants for minimal" in
-  # lighthouse:glamsterdam-devnet-3.
+  chainId: 32387
+  # ethpandaops glamsterdam-devnet-3 builds use mainnet preset spec
+  # constants — minimal preset is rejected at startup.
   preset: mainnet
-  validatorCount: 192
+  validatorCount: 64
   genesisGenerator:
-    # 6.0.5 ships the gloas (Amsterdam) fork; we hand-set GLOAS_FORK_EPOCH=0
-    # via extraEnv to activate it at genesis.
     image: ethpandaops/ethereum-genesis-generator:6.0.5
-    # elFork/clFork are advisory in 6.x — the actual switch is the per-fork
-    # EPOCH env. Keep them informative.
     elFork: gloas
     clFork: gloas
     genesisDelay: 30
     mnemonic: "test test test test test test test test test test test alone"
-    # All earlier forks default to epoch 0 (cancun → fulu).
-    # Activate Glamsterdam (gloas) at genesis. Upstream devnet-3 uses
-    # epoch 1, but requires the matching upstream GLOAS_FORK_VERSION
-    # (0x80467850) to avoid CL "Invalid variant" errors at the
-    # Fulu→Gloas slot boundary. Epoch 0 avoids the transition entirely.
+    # Activate Glamsterdam (gloas) at genesis.
+    #
+    # Upstream glamsterdam-devnet-3 uses epoch 1 (one Fulu epoch before
+    # the PTC/EPB flip). Verified locally that this triggers
+    # `BeaconStateError(IncorrectStateVariant)` on `PTC duties` calls
+    # during epoch 0 (vc requests Gloas-only duties before the fork
+    # activates) — every slot is missed and the chain never advances.
+    # Likely root cause: GLOAS_FORK_VERSION mismatch with upstream
+    # (0x80000000 vs upstream 0x80467850), which makes lighthouse's
+    # version-domain checks misroute duty dispatch.
+    #
+    # Until the chart wires through GLOAS_FORK_VERSION via genesis-
+    # generator env, epoch 0 is the only stable choice — Gloas runs
+    # from genesis, no Fulu→Gloas transition, no PTC duty mismatch.
     extraEnv:
       GLOAS_FORK_EPOCH: "0"
   genesisService:
@@ -73,12 +73,12 @@ p2pKey:
 peerTable:
   enabled: true
 
-# ── shared geth (ethpandaops bal-devnet-6 build) ─────────────────────
+# ── geth (ethpandaops bal-devnet-6 build) ────────────────────────────
 _geth_command: &geth_command
   - geth
   - --config=/peers/geth-config.toml
   - --datadir=/data/ethereum
-  - --networkid=32382
+  - --networkid=32387
   - --syncmode=full
   - --gcmode=archive
   - --state.scheme=path
@@ -116,7 +116,7 @@ _geth_node: &geth_node
     - { name: p2p,     port: 30303 }
     - { name: metric,  port: 6061 }
 
-# ── shared lighthouse (ethpandaops glamsterdam-devnet-3) ─────────────
+# ── lighthouse (ethpandaops glamsterdam-devnet-3 build) ──────────────
 _lh_command: &lh_command
   - |
     BOOT_NODES=""
@@ -154,27 +154,12 @@ _lh_node: &lh_node
     - { name: p2p,    port: 9000 }
     - { name: metric, port: 5054 }
 
-# ── topology ─────────────────────────────────────────────────────────
 nodes:
   - name: validator1
     role: validator
     el: *geth_node
     cl: *lh_node
-    validatorKeys: { indexStart: 0,   indexEnd: 64 }
+    validatorKeys: { indexStart: 0, indexEnd: 64 }
 
-  - name: validator2
-    role: validator
-    el: *geth_node
-    cl: *lh_node
-    validatorKeys: { indexStart: 64,  indexEnd: 128 }
-
-  - name: validator3
-    role: validator
-    el: *geth_node
-    cl: *lh_node
-    validatorKeys: { indexStart: 128, indexEnd: 192 }
-
-  - name: rpc1
-    role: rpc
-    el: *geth_node
-    cl: *lh_node
+grafanaDashboard:
+  enabled: true

@@ -12,8 +12,17 @@ spec:
   selector:
     app: {{ $name }}
   ports:
+    # `http` (port 80) → genesis static service: nginx server_name `_`,
+    # autoindex on, serves /el/genesis.json, /cl/config.yaml, etc.
     - name: http
       port: 80
       targetPort: 80
+      protocol: TCP
+    # `www` (port 8080) → landing dashboard only: separate nginx server
+    # with its own root directory containing index.html. Isolated from
+    # the genesis tree so visitors can't accidentally browse artefacts.
+    - name: www
+      port: 8080
+      targetPort: 8080
       protocol: TCP
 {{- end }}

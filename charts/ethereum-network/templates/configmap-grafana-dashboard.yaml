@@ -1,0 +1,144 @@
+{{- if .Values.grafanaDashboard.enabled -}}
+{{/*
+Ethereum chain overview dashboard. Loaded into Grafana via its sidecar
+that watches ConfigMaps labelled grafana_dashboard=1.
+
+Variables:
+  $ds        — datasource (auto-selected first Prometheus / VM)
+  $namespace — narrows scope to the kube namespace running the release
+  $chain_id  — narrows scope to a specific devnet (multiple devnets can
+               share the same vmstack; chart's VMServiceScrape injects
+               a static `chain_id` relabel for every series)
+  $network   — release name (multi-release filter; defaults to "All")
+*/}}
+{{- $rel := include "ethereum-network.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # uid-stable name so the dashboard updates in place across releases
+  # rather than spawning duplicates.
+  name: ethereum-network-chain-overview
+  labels:
+    {{- include "ethereum-network.labels" . | nindent 4 }}
+    # sidecar selector — kiwigrid/k8s-sidecar / grafana built-in sidecar
+    # both honour this label.
+    grafana_dashboard: "1"
+data:
+  ethereum-network-chain-overview.json: |-
+    {
+      "uid": "ethereum-network-chain-overview",
+      "title": "Ethereum Network — Chain Overview",
+      "tags": ["ethereum", "ethereum-network"],
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": {"from": "now-30m", "to": "now"},
+      "templating": {
+        "list": [
+          {
+            "type": "datasource",
+            "name": "ds",
+            "label": "Datasource",
+            "query": "prometheus",
+            "current": {"text": "VictoriaMetrics", "value": "VictoriaMetrics"},
+            "hide": 0
+          },
+          {
+            "type": "query",
+            "name": "namespace",
+            "label": "Namespace",
+            "datasource": {"type": "prometheus", "uid": "${ds}"},
+            "query": "label_values(chain_head_block, namespace)",
+            "refresh": 1,
+            "multi": true,
+            "includeAll": true,
+            "current": {"text": "All", "value": "$__all"}
+          },
+          {
+            "type": "query",
+            "name": "chain_id",
+            "label": "Chain ID",
+            "datasource": {"type": "prometheus", "uid": "${ds}"},
+            "query": "label_values(chain_head_block{namespace=~\"$namespace\"}, chain_id)",
+            "refresh": 1,
+            "multi": true,
+            "includeAll": true,
+            "current": {"text": "All", "value": "$__all"}
+          },
+          {
+            "type": "query",
+            "name": "network",
+            "label": "Release",
+            "datasource": {"type": "prometheus", "uid": "${ds}"},
+            "query": "label_values(chain_head_block{namespace=~\"$namespace\", chain_id=~\"$chain_id\"}, network)",
+            "refresh": 1,
+            "multi": true,
+            "includeAll": true,
+            "current": {"text": "All", "value": "$__all"}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row", "title": "Execution Layer", "id": 1,
+          "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+        },
+        {
+          "type": "timeseries",
+          "title": "EL Head Block",
+          "id": 2,
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+          "datasource": {"type": "prometheus", "uid": "${ds}"},
+          "targets": [
+            {"expr": "chain_head_block{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} head"},
+            {"expr": "chain_head_finalized{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} finalized"}
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "EL Peers",
+          "id": 3,
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+          "datasource": {"type": "prometheus", "uid": "${ds}"},
+          "targets": [
+            {"expr": "p2p_peers{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} (geth p2p_peers)"},
+            {"expr": "reth_network_connected_peers{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} (reth)"}
+          ]
+        },
+        {
+          "type": "row", "title": "Consensus Layer", "id": 4,
+          "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9}
+        },
+        {
+          "type": "timeseries",
+          "title": "CL Head Slot",
+          "id": 5,
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+          "datasource": {"type": "prometheus", "uid": "${ds}"},
+          "targets": [
+            {"expr": "beacon_head_slot{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} head"},
+            {"expr": "beacon_finalized_slot{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} finalized"}
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "CL Peers",
+          "id": 6,
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+          "datasource": {"type": "prometheus", "uid": "${ds}"},
+          "targets": [
+            {"expr": "libp2p_peers{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} (lighthouse libp2p_peers)"},
+            {"expr": "p2p_peer_count{namespace=~\"$namespace\", chain_id=~\"$chain_id\", network=~\"$network\", state=\"Connected\"}",
+             "legendFormat": "{{`{{network}}/{{pod}}`}} (prysm)"}
+          ]
+        }
+      ]
+    }
+{{- end }}

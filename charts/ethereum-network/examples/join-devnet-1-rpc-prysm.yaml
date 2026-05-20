@@ -1,0 +1,141 @@
+# Attach an RPC node (geth + prysm) to the running devnet-1
+# (single-validator Glamsterdam devnet, chainId 32386).
+#
+# Bootstrap path:
+#   1. Genesis (config.yaml / genesis.ssz / genesis.json / jwt) is pulled
+#      from devnet-1's in-cluster `ethereum-devnet-1-genesis` service.
+#   2. Prysm beacon uses checkpoint-sync against devnet-1's validator1
+#      beacon REST API, so it skips weak-subjectivity backfill and
+#      starts following at the latest finalized head.
+#   3. peer-table + p2pKey use HD indices past devnet-1's allocation
+#      (devnet-1 took 100..101 → we start at 102) so enode/peerID are
+#      deterministic and pre-shareable.
+#
+# Install:
+#   helm install ethereum-devnet-1-follower \
+#     ./charts/charts/ethereum-network \
+#     -f charts/charts/ethereum-network/examples/join-devnet-1-rpc-prysm.yaml \
+#     -n infra
+
+mode: join
+join:
+  source: custom
+  custom:
+    genesisUrl: http://ethereum-devnet-1-genesis.infra.svc.cluster.local
+    mnemonic: "test test test test test test test test test test test alone"
+    # devnet-1 single-validator release used HD indices 100..101 for its
+    # one node (el + cl). Start follower past that range.
+    indexStart: 102
+    # Devnet-1's own peer-table (kubectl get cm ethereum-devnet-1-peer-table)
+    # publishes these enode/libp2p multiaddrs. We embed them here so this
+    # follower can dial the validator pod directly without depending on
+    # DNS-SD or external discovery. If devnet-1 ever changes its mnemonic
+    # or indexStart, regenerate these from the source peer-table.
+    bootnodes:
+      el:
+        - enode://b850410b8ec18f8b04f9f616a2d55a12858d447c7d74154e7eceab72cc322d0d7a812adcd0f5a1df5ef16e6af86296f77497bdbee7855eed79f544b57c23ad6b@ethereum-devnet-1-validator1-0.ethereum-devnet-1-validator1.infra.svc.cluster.local:30303
+      cl:
+        - /dns4/ethereum-devnet-1-validator1-0.ethereum-devnet-1-validator1.infra.svc.cluster.local/tcp/9000/p2p/16Uiu2HAmM8Pe2PSXekEPfmRHfsqXopqUdDJfy9GsdbMXutPpqQjr
+    chainId: 32386
+
+baseDomain: local.sh0.link
+domainSuffixEnabled: true
+
+peerTable:
+  enabled: true
+p2pKey:
+  enabled: true
+  indexStart: 102   # mirrors join.custom.indexStart
+
+nodes:
+  - name: rpc1
+    role: rpc
+    el:
+      client: geth
+      # Match devnet-1's EL build so chainspec / fork-block parsing is
+      # byte-identical — vanilla ethereum/client-go also works for
+      # Glamsterdam EL ("gloas") but bal-devnet-6 is the verified pin.
+      image: { repository: ethpandaops/geth, tag: bal-devnet-6 }
+      dataPath: /data/ethereum
+      command:
+        - geth
+        - --datadir=/data/ethereum
+        - --networkid=32386
+        - --syncmode=full
+        - --gcmode=archive
+        - --state.scheme=path
+        - --http
+        - --http.api=eth,net,web3,debug,txpool
+        - --http.addr=0.0.0.0
+        - --http.vhosts=*
+        - --http.corsdomain=*
+        - --ws
+        - --ws.addr=0.0.0.0
+        - --authrpc.port=8551
+        - --authrpc.addr=0.0.0.0
+        - --authrpc.vhosts=*
+        - --authrpc.jwtsecret=/jwt/jwtsecret
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port=6061
+        - --discovery.dns=
+        - --maxpeers=10
+        - --port=30303
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "2",  memory: 4Gi }
+      persistence: { size: 20Gi }
+      ports:
+        - { name: rpc,     port: 8545 }
+        - { name: ws,      port: 8546 }
+        - { name: authrpc, port: 8551 }
+        - { name: p2p,     port: 30303 }
+        - { name: metric,  port: 6061 }
+
+    cl:
+      client: prysm
+      image: { repository: ethpandaops/prysm-beacon-chain, tag: glamsterdam-devnet-3 }
+      dataPath: /data/prysm
+      commandShell: true
+      command:
+        - |
+          BOOT_FLAG=""
+          if [ -s /shared/cl-bootnodes.txt ]; then
+            BOOT_FLAG="--bootstrap-node=$(cat /shared/cl-bootnodes.txt)"
+          fi
+          BIN=/beacon-chain
+          [ -x /app/cmd/beacon-chain/beacon-chain ] && BIN=/app/cmd/beacon-chain/beacon-chain
+          # checkpoint-sync pulls latest finalized state from devnet-1's
+          # validator1 beacon REST API → instant follower bring-up, no
+          # backfill from genesis.ssz. genesis-state is still required as
+          # an anchor; prysm verifies the checkpoint state derives from it.
+          exec $BIN \
+            --datadir=/data/prysm \
+            --chain-config-file=/shared/metadata/config.yaml \
+            --genesis-state=/shared/metadata/genesis.ssz \
+            --checkpoint-sync-url=http://ethereum-devnet-1-validator1.infra.svc.cluster.local:5052 \
+            --genesis-beacon-api-url=http://ethereum-devnet-1-validator1.infra.svc.cluster.local:5052 \
+            --rpc-host=0.0.0.0 \
+            --grpc-gateway-host=0.0.0.0 \
+            --grpc-gateway-port=5052 \
+            --http-modules=eth,net,web3 \
+            --monitoring-host=0.0.0.0 \
+            --monitoring-port=5054 \
+            --p2p-tcp-port=9000 \
+            --p2p-udp-port=9000 \
+            --p2p-host-ip="$POD_IP" \
+            --p2p-priv-key=/data/prysm/network-keys \
+            --min-sync-peers=0 \
+            --execution-endpoint=http://localhost:8551 \
+            --jwt-secret=/jwt/jwtsecret \
+            --accept-terms-of-use \
+            --suggested-fee-recipient=0x0000000000000000000000000000000000000000 \
+            $BOOT_FLAG
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "1",  memory: 4Gi }
+      persistence: { size: 10Gi }
+      ports:
+        - { name: beacon, port: 5052 }
+        - { name: p2p,    port: 9000 }
+        - { name: metric, port: 5054 }

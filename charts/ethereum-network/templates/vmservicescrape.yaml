@@ -38,6 +38,14 @@ spec:
   {{- range $endpoints }}
     - port: {{ .port }}
       path: {{ .path }}
+      # Inject static labels onto every scraped series so grafana variables
+      # (chain_id, network) can filter cleanly across multiple devnets
+      # sharing the same VM stack.
+      relabelConfigs:
+        - target_label: chain_id
+          replacement: {{ include "ethereum-network.chainId" $ctx | quote }}
+        - target_label: network
+          replacement: {{ $ctx.Release.Name | quote }}
   {{- end }}
 {{- end }}
 {{- end }}
