@@ -50,9 +50,11 @@ devnet:
     clFork: gloas
     genesisDelay: 30
     mnemonic: "test test test test test test test test test test test alone"
+    # Activate Glamsterdam (gloas) at genesis. Upstream devnet-3 sets
+    # epoch 1, but doing so requires the upstream GLOAS_FORK_VERSION
+    # (0x80467850) — without it CLs hit "Invalid variant" / PTC duty
+    # 500s at the Fulu→Gloas boundary. Epoch 0 sidesteps the transition.
     extraEnv:
-      # Activate Glamsterdam at genesis; later forks stay at the "never"
-      # sentinel so prysm doesn't trip on unknown post-Glamsterdam fields.
       GLOAS_FORK_EPOCH: "0"
   genesisService:
     image: ghcr.io/sh0link/debugger:1.0.0
